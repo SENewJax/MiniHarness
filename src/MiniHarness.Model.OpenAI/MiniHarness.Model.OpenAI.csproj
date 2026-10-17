@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="../MiniHarness.Abstractions/MiniHarness.Abstractions.csproj" />
+    <ProjectReference Include="../MiniHarness.Protocols.OpenAI/MiniHarness.Protocols.OpenAI.csproj" />
+  </ItemGroup>
+</Project>

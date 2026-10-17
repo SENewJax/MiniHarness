@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType></PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/MiniHarness.Model.OpenAI/MiniHarness.Model.OpenAI.csproj" />
+    <ProjectReference Include="../../src/MiniHarness.Harness/MiniHarness.Harness.csproj" />
+  </ItemGroup>
+</Project>

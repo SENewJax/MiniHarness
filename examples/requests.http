@@ -1,0 +1,74 @@
+@base = http://127.0.0.1:5080
+@key = replace-with-Server-ApiKey-if-configured
+
+### Models
+GET {{base}}/v1/models
+Authorization: Bearer {{key}}
+
+### Chat Completions: the server executes add, then asks the model to finish
+POST {{base}}/v1/chat/completions
+Content-Type: application/json
+Authorization: Bearer {{key}}
+
+{
+  "model": "mini-agent",
+  "messages": [{ "role": "user", "content": "请使用 add 工具计算 2 + 3，然后说明结果。" }],
+  "max_completion_tokens": 1024
+}
+
+### Responses: same agent, independently configured upstream protocol
+POST {{base}}/v1/responses
+Content-Type: application/json
+Authorization: Bearer {{key}}
+
+{
+  "model": "mini-agent",
+  "input": "请使用 add 工具计算 2 + 3，然后说明结果。",
+  "max_output_tokens": 1024,
+  "store": true
+}
+
+### Buffered Responses SSE
+POST {{base}}/v1/responses
+Content-Type: application/json
+Authorization: Bearer {{key}}
+
+{
+  "model": "mini-agent",
+  "input": "你好",
+  "stream": true
+}
+
+### Client-owned function: returned to the caller, not executed by the server
+POST {{base}}/v1/responses
+Content-Type: application/json
+Authorization: Bearer {{key}}
+
+{
+  "model": "mini-agent",
+  "input": "查询上海天气",
+  "tools": [{
+    "type": "function",
+    "name": "weather",
+    "description": "Query weather for a city",
+    "parameters": {
+      "type": "object",
+      "properties": { "city": { "type": "string" } },
+      "required": ["city"],
+      "additionalProperties": false
+    },
+    "strict": true
+  }],
+  "tool_choice": { "type": "function", "name": "weather" }
+}
+
+### Fill in the response ID and call_id from the previous response
+POST {{base}}/v1/responses
+Content-Type: application/json
+Authorization: Bearer {{key}}
+
+{
+  "model": "mini-agent",
+  "previous_response_id": "resp_REPLACE",
+  "input": [{ "type": "function_call_output", "call_id": "call_REPLACE", "output": "晴，24°C" }]
+}

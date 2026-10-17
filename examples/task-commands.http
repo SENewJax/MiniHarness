@@ -1,0 +1,110 @@
+@base = http://127.0.0.1:5080
+@key = replace-with-Server-ApiKey-if-configured
+@task = task_REPLACE_WITH_RETURNED_TASK_ID
+@operation = op_REPLACE_WITH_PENDING_OPERATION_ID
+@revision = REPLACE_WITH_CURRENT_WORKSPACE_REVISION
+
+### Start a persistent task. Change the command ID for a new task.
+POST {{base}}/agent/tasks/commands?wait=false
+Content-Type: application/json
+Authorization: Bearer {{key}}
+
+{
+  "id": "example-start-001",
+  "kind": "Start",
+  "request": {
+    "model": "mini-agent",
+    "messages": [{ "role": "user", "text": "请使用 add 计算 17+25，再回答实际结果。" }],
+    "options": { "toolChoice": "add", "maxOutputTokens": 512 }
+  }
+}
+
+### Inspect task, pending operations, resources, evidence and total budget
+GET {{base}}/agent/tasks/{{task}}
+Authorization: Bearer {{key}}
+
+### Native progress stream. Disconnecting observation leaves the task running.
+GET {{base}}/agent/tasks/{{task}}/events?after=0&follow=true
+Authorization: Bearer {{key}}
+
+### A second turn: same task ID and cumulative budget
+POST {{base}}/agent/tasks/commands
+Content-Type: application/json
+Authorization: Bearer {{key}}
+
+{
+  "id": "example-input-001",
+  "kind": "Input",
+  "taskId": "{{task}}",
+  "request": {
+    "model": "mini-agent",
+    "messages": [{ "role": "user", "text": "上一轮工具返回了什么数字？只回答数字。" }],
+    "options": { "toolChoice": "none", "maxOutputTokens": 512 }
+  }
+}
+
+### Only valid if a configured policy returned ApprovalRequired
+POST {{base}}/agent/tasks/commands
+Content-Type: application/json
+Authorization: Bearer {{key}}
+
+{ "id": "example-approval-001", "kind": "Approval", "taskId": "{{task}}", "operationId": "{{operation}}", "approve": true }
+
+### Pause active work; creates a recoverable interruption
+POST {{base}}/agent/tasks/commands
+Content-Type: application/json
+Authorization: Bearer {{key}}
+
+{ "id": "example-pause-001", "kind": "Pause", "taskId": "{{task}}" }
+
+### Resume checks pending operations, snapshots and budget before doing work
+POST {{base}}/agent/tasks/commands
+Content-Type: application/json
+Authorization: Bearer {{key}}
+
+{ "id": "example-resume-001", "kind": "Resume", "taskId": "{{task}}" }
+
+### Cancel task and ask registered managers to confirm resource cancellation
+POST {{base}}/agent/tasks/commands
+Content-Type: application/json
+Authorization: Bearer {{key}}
+
+{ "id": "example-cancel-001", "kind": "Cancel", "taskId": "{{task}}" }
+
+### Query a resource returned by a configured contextual tool
+POST {{base}}/agent/tasks/commands
+Content-Type: application/json
+Authorization: Bearer {{key}}
+
+{ "id": "resource-query-001", "kind": "QueryResource", "taskId": "{{task}}", "resourceId": "replace-with-resource-id" }
+
+### Reconcile resource handles after reload (requires registered IResourceManager)
+POST {{base}}/agent/tasks/commands
+Content-Type: application/json
+Authorization: Bearer {{key}}
+
+{ "id": "resource-reconcile-001", "kind": "ReconcileResources", "taskId": "{{task}}" }
+
+### Create child at a completed parent turn; consumes real model calls if executed
+POST {{base}}/agent/tasks/commands
+Content-Type: application/json
+Authorization: Bearer {{key}}
+
+{
+  "id": "child-create-001",
+  "kind": "StartChild",
+  "taskId": "{{task}}",
+  "childBudget": { "maxModelCalls": 2, "maxToolCalls": 1, "maxTokens": 2000 },
+  "request": {
+    "model": "mini-agent",
+    "messages": [{ "role": "user", "text": "请给出一个简短的子任务结果。" }],
+    "options": { "toolChoice": "none", "maxOutputTokens": 128 }
+  }
+}
+
+### Collect after child finishes; childTaskId is in parent.children
+POST {{base}}/agent/tasks/commands
+Content-Type: application/json
+Authorization: Bearer {{key}}
+
+{ "id": "child-collect-001", "kind": "CollectChild", "taskId": "{{task}}", "childTaskId": "replace-with-child-task-id" }

@@ -1,0 +1,16 @@
+param([string]$DotnetPath = 'dotnet', [ValidateSet('all','legacy','1','2','3','4-5','6','7','v0-control','v0-replan','v0-resource','v0-child')][string]$Stage = 'all')
+$ErrorActionPreference = 'Stop'
+$workspace = Split-Path -Parent $PSScriptRoot
+Push-Location -LiteralPath $workspace
+try {
+    & $DotnetPath build MiniHarness.sln --configuration Release --nologo
+    if ($LASTEXITCODE -ne 0) { throw 'Build failed. A .NET 9 SDK is required; a runtime alone cannot compile this project.' }
+    if ($Stage -eq '7') {
+        & $DotnetPath run --project tests/MiniHarness.LiveTests --configuration Release --no-build -- --runtime
+    }
+    else {
+        & $DotnetPath run --project tests/MiniHarness.Tests --configuration Release --no-build -- --stage $Stage
+    }
+    if ($LASTEXITCODE -ne 0) { throw 'Verification failed.' }
+}
+finally { Pop-Location }
