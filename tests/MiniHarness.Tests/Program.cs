@@ -1,5 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace MiniHarness.Tests
@@ -8,15 +11,24 @@ namespace MiniHarness.Tests
     {
         public static async Task<int> Main(string[] args)
         {
+            // Self-hosted target process for the V1 controlled-process tests. The
+            // test runner launches an independent copy of itself via
+            // Environment.ProcessPath and exercises real exit codes/output/kill.
+            if (args.Length >= 1 && args[0] == "--self")
+                return SelfTarget(args);
+
             var tests = new List<(string Name, Func<Task> Run)>();
             HarnessTests.Register(tests);
             ProtocolTests.Register(tests);
             HttpTests.Register(tests);
             TaskStageTests.Register(tests);
+            CodingStageTests.Register(tests);
+            VerificationStageTests.Register(tests);
+            CodingEndToEndStageTests.Register(tests);
             string stage = args.Length == 2 && args[0] == "--stage" ? args[1] : "all";
             if (args.Length != 0 && (args.Length != 2 || args[0] != "--stage"))
             {
-                Console.WriteLine("Usage: --stage all|legacy|1|2|3|4-5|6|v0-control|v0-replan|v0-resource|v0-child"); return 2;
+                Console.WriteLine("Usage: --stage all|legacy|1|2|3|4-5|6|v0-control|v0-replan|v0-resource|v0-child|v1-workspace|v1-mutation|v1-tool|v1-process|v1-verify|v1-e2e"); return 2;
             }
             tests = tests.FindAll(t => stage == "all" || (stage == "legacy" ? !t.Name.StartsWith("[", StringComparison.Ordinal)
                 : t.Name.StartsWith("[" + stage + "]", StringComparison.Ordinal)));
@@ -28,6 +40,73 @@ namespace MiniHarness.Tests
                 catch (Exception ex) { failures++; Console.WriteLine("FAIL " + test.Name + "\n" + ex); }
             }
             Console.WriteLine($"{tests.Count - failures}/{tests.Count} tests passed.");
+            return failures == 0 ? 0 : 1;
+        }
+
+        // Deterministic child program used by V1 process tests:
+        //   --self exit <code>              exit with a real code
+        //   --self chatter <lines>          emit that many stdout lines (pipe-drain test)
+        //   --self tests <count>            print a "Tests run: <count>" marker
+        //   --self sleep <seconds>          ignore nothing; killed on timeout
+        //   --self echoerr <text>           write to stderr and exit 3
+        private static int SelfTarget(string[] args)
+        {
+            string mode = args.Length > 1 ? args[1] : "exit";
+            string value = args.Length > 2 ? args[2] : "0";
+            switch (mode)
+            {
+                case "exit":
+                    return int.TryParse(value, out int code) ? code : 0;
+                case "echoerr":
+                    Console.Error.WriteLine(value);
+                    return 3;
+                case "chatter":
+                    int lines = int.TryParse(value, out lines) ? lines : 0;
+                    for (int i = 0; i < lines; i++) Console.WriteLine("line " + i + " " + new string('x', 64));
+                    return 0;
+                case "tests":
+                    int count = int.TryParse(value, out count) ? count : 0;
+                    Console.WriteLine("Tests run: " + count);
+                    return 0;
+                case "sleep":
+                    int seconds = int.TryParse(value, out seconds) ? seconds : 30;
+                    Thread.Sleep(TimeSpan.FromSeconds(seconds));
+                    return 0;
+                case "touch":
+                    System.IO.File.WriteAllText(value, "changed during verification\n");
+                    return 0;
+                case "project-tests":
+                    return RunProjectTests();
+                default:
+                    return 0;
+            }
+        }
+
+        // Real project-under-test for the V1 end-to-end loop. Working directory is
+        // the workspace root. Every tests/*.tst file is one discovered test: its
+        // trimmed content is the expected value and value.txt holds the actual
+        // value. Exit code is zero only when every discovered test passes.
+        private static int RunProjectTests()
+        {
+            string root = Directory.GetCurrentDirectory();
+            string valuePath = System.IO.Path.Combine(root, "value.txt");
+            string testsDir = System.IO.Path.Combine(root, "tests");
+            string actual = System.IO.File.Exists(valuePath) ? System.IO.File.ReadAllText(valuePath).Trim() : "";
+            var testFiles = Directory.Exists(testsDir)
+                ? Directory.GetFiles(testsDir, "*.tst").OrderBy(p => p, StringComparer.Ordinal).ToList()
+                : new List<string>();
+            int failures = 0;
+            foreach (var file in testFiles)
+            {
+                string expected = System.IO.File.ReadAllText(file).Trim();
+                if (expected != actual)
+                {
+                    failures++;
+                    Console.Error.WriteLine("Failed: " + System.IO.Path.GetFileName(file) + " expected '" + expected + "' got '" + actual + "'");
+                }
+                else Console.WriteLine("Passed: " + System.IO.Path.GetFileName(file));
+            }
+            Console.WriteLine("Tests run: " + testFiles.Count);
             return failures == 0 ? 0 : 1;
         }
     }

@@ -118,14 +118,19 @@ namespace MiniHarness.Tests
         private static async Task<JsonObject> ReadTask(HttpClient client, string id) => (JsonObject)JsonNode.Parse(await client.GetStringAsync("/agent/tasks/" + id))!;
         private static async Task<JsonObject> WaitForTurn(HttpClient client, string id, int turns)
         {
-            for (int i = 0; i < 100; i++)
+            // The turn runs two in-process upstream round-trips; on a cold JIT the
+            // hosted server's first startup/DI path can take several seconds. Poll by
+            // condition with a generous deadline instead of a wall-clock budget that
+            // depends on machine warm-up. The expected turn returns immediately.
+            JsonObject state = null!;
+            for (int i = 0; i < 600; i++)
             {
-                var state = await ReadTask(client, id);
+                state = await ReadTask(client, id);
                 if (state["turns"]!.AsArray().Count == turns && state["turns"]![turns - 1]!["status"]!.GetValue<string>() == "Completed") return state;
                 if (state["status"]!.GetValue<string>() == "Failed") throw new Exception(state.ToJsonString());
                 await Task.Delay(50);
             }
-            throw new Exception("Task did not finish the expected turn.");
+            throw new Exception("Task did not finish the expected turn. Final state: " + state.ToJsonString());
         }
     }
 }

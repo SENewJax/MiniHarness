@@ -17,9 +17,10 @@ namespace MiniHarness.Server
         private readonly ITaskRuntime runtime;
         private readonly ModelOptions model;
         private readonly ServerOptions server;
+        private readonly CodingTaskSetup codingSetup;
         private readonly ILogger<TaskApi> logger;
-        public TaskApi(ITaskRuntime runtime, ModelOptions model, ServerOptions server, ILogger<TaskApi> logger)
-        { this.runtime = runtime; this.model = model; this.server = server; this.logger = logger; }
+        public TaskApi(ITaskRuntime runtime, ModelOptions model, ServerOptions server, CodingTaskSetup codingSetup, ILogger<TaskApi> logger)
+        { this.runtime = runtime; this.model = model; this.server = server; this.codingSetup = codingSetup; this.logger = logger; }
         public void Map(WebApplication app)
         {
             app.MapPost("/agent/tasks/commands", (HttpContext http) => GuardAsync(http, async () =>
@@ -96,6 +97,7 @@ namespace MiniHarness.Server
                 command.Facts.Workspace.RootPath = resolved;
             }
             command.Facts.Workspace.Grants = server.WorkspaceGrants.ToList();
+            codingSetup.Apply(command.Facts);
         }
         private async Task GuardAsync(HttpContext http, Func<Task> action)
         {

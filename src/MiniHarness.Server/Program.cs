@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net.Http;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -7,6 +9,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using MiniHarness.Abstractions;
+using MiniHarness.Coding;
 using MiniHarness.Harness;
 using MiniHarness.Model.OpenAI;
 
@@ -33,6 +36,7 @@ namespace MiniHarness.Server
             var harness = builder.Configuration.GetSection("Harness").Get<HarnessOptions>() ?? new HarnessOptions();
             var storage = builder.Configuration.GetSection("Storage").Get<StorageOptions>() ?? new StorageOptions();
             var toolOptions = builder.Configuration.GetSection("Tools").Get<ToolsOptions>() ?? new ToolsOptions();
+            var codingOptions = builder.Configuration.GetSection("Coding").Get<CodingOptions>() ?? new CodingOptions();
             server.Validate(); model.Validate(); harness.Validate();
             builder.WebHost.ConfigureKestrel(k => k.Limits.MaxRequestBodySize = server.MaxRequestBodyBytes);
             builder.Services.AddSingleton(server);
@@ -46,11 +50,32 @@ namespace MiniHarness.Server
                 ConfigurationVersion = TaskJson.Hash(model.BaseUrl.TrimEnd('/') + "|" + model.Model + "|" + model.Protocol)
             };
             builder.Services.AddSingleton(binding);
-            builder.Services.AddSingleton<IToolRegistry>(new ToolRegistry(new ITool[] { new EchoTool(), new AddTool(), new UtcTimeTool() }));
-            builder.Services.AddSingleton<IToolPolicy>(new AllowListToolPolicy(toolOptions.AllowedNames));
+
+            // V1 coding capability is opt-in. When enabled, the coding tools are
+            // registered alongside the sample tools and share one revision
+            // provider with the runtime, so verification fingerprints match the
+            // workspace gate exactly.
+            CodingComposition? coding = codingOptions.Enabled
+                ? new CodingComposition(codingOptions, builder.Environment.ContentRootPath)
+                : null;
+            var registeredTools = new List<ITool> { new EchoTool(), new AddTool(), new UtcTimeTool() };
+            var allowedNames = new List<string>(toolOptions.AllowedNames);
+            if (coding != null)
+            {
+                registeredTools.AddRange(coding.Tools);
+                allowedNames.AddRange(coding.Tools.Select(t => t.Definition.Name));
+            }
+            builder.Services.AddSingleton<IToolRegistry>(new ToolRegistry(registeredTools));
+            builder.Services.AddSingleton<IToolPolicy>(new AllowListToolPolicy(allowedNames));
             builder.Services.AddSingleton<IToolExecutor, ToolExecutor>();
             builder.Services.AddSingleton<IContextBuilder, ContextBuilder>();
             builder.Services.AddSingleton<ICompletionPolicy, NaturalStopPolicy>();
+            // The workspace gate and verification tool must hash the workspace with
+            // exactly the same rules, so they share one revision provider instance.
+            IWorkspaceRevisionProvider revisionProvider = coding?.Revision ?? new DirectoryWorkspaceRevision();
+            ITaskCompletionPolicy taskCompletion = coding != null
+                ? new CodingRoutingPolicy(new EvidenceCompletionPolicy())
+                : new EvidenceCompletionPolicy();
             builder.Services.AddHttpClient("model", client => client.Timeout = System.Threading.Timeout.InfiniteTimeSpan)
                 .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
             builder.Services.AddSingleton<IModelProvider>(services =>
@@ -62,12 +87,14 @@ namespace MiniHarness.Server
             builder.Services.AddSingleton<TaskRuntime>(services => new TaskRuntime(services.GetRequiredService<IModelProvider>(),
                 services.GetRequiredService<ITaskStore>(), harness, binding, tools: services.GetRequiredService<IToolRegistry>(),
                 toolPolicy: services.GetRequiredService<IToolPolicy>(), executor: services.GetRequiredService<IToolExecutor>(),
+                completion: taskCompletion, workspaceRevision: revisionProvider,
                 resourceManagers: services.GetServices<IResourceManager>()));
             builder.Services.AddSingleton<ITaskRuntime>(services => services.GetRequiredService<TaskRuntime>());
             builder.Services.AddSingleton<ProtocolAgentService>();
             builder.Services.AddSingleton<IAgentService>(services => services.GetRequiredService<ProtocolAgentService>());
             builder.Services.AddSingleton<IAgentRunner>(services => services.GetRequiredService<ProtocolAgentService>());
             builder.Services.AddSingleton<AgentApi>();
+            builder.Services.AddSingleton(coding != null ? new CodingTaskSetup(coding) : new CodingTaskSetup());
             builder.Services.AddSingleton<TaskApi>();
             var app = builder.Build();
             app.Services.GetRequiredService<AgentApi>().Map(app);

@@ -32,12 +32,13 @@ namespace MiniHarness.Harness
                 Effect = bound.Invoked ? (result.Status == ToolCallStatus.Succeeded ? EffectState.Confirmed : EffectState.Unknown) : EffectState.None
             };
         }
-        private sealed class BoundTool : ITool
+        private sealed class BoundTool : ITool, IToolTimeout
         {
             private readonly ITool tool;
             private readonly ToolExecutionContext context;
             public bool Invoked { get; private set; }
             public ToolOutcome? Outcome { get; private set; }
+            public int TimeoutSeconds => tool is IToolTimeout custom && custom.TimeoutSeconds > 0 ? custom.TimeoutSeconds : 0;
             public ToolDefinition Definition => context.Capabilities.Tools.SingleOrDefault(t => t.Name == tool.Definition.Name) ?? tool.Definition;
             public BoundTool(ITool tool, ToolExecutionContext context) { this.tool = tool; this.context = context; }
             public async Task<string> ExecuteAsync(JsonElement arguments, CancellationToken cancellationToken)

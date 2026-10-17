@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
@@ -45,6 +46,22 @@ namespace MiniHarness.Harness
     }
     public sealed class DirectoryWorkspaceRevision : IWorkspaceRevisionProvider
     {
+        // Build/test outputs and harness state must never move the source fingerprint,
+        // otherwise a verification run would invalidate its own passing evidence.
+        public static readonly IReadOnlySet<string> DefaultIgnoredDirectories =
+            new HashSet<string>(new[] { ".git", ".data", "bin", "obj", "TestResults", ".vs", "node_modules" }, StringComparer.Ordinal);
+        private readonly IReadOnlySet<string> ignoredDirectories;
+
+        public DirectoryWorkspaceRevision() : this(null) { }
+        public DirectoryWorkspaceRevision(IEnumerable<string>? additionalIgnoredDirectories)
+        {
+            var set = new HashSet<string>(DefaultIgnoredDirectories, StringComparer.Ordinal);
+            if (additionalIgnoredDirectories != null)
+                foreach (var name in additionalIgnoredDirectories)
+                    if (!string.IsNullOrWhiteSpace(name)) set.Add(name);
+            ignoredDirectories = set;
+        }
+
         public async Task<string> GetRevisionAsync(WorkspaceScope workspace, CancellationToken ct)
         {
             if (workspace.RootPath.Length == 0) return workspace.Revision;
@@ -61,7 +78,7 @@ namespace MiniHarness.Harness
                     if (Directory.Exists(entry))
                     {
                         string name = Path.GetFileName(entry);
-                        if (name != ".git" && name != ".data" && name != "bin" && name != "obj") await Visit(entry).ConfigureAwait(false);
+                        if (!ignoredDirectories.Contains(name)) await Visit(entry).ConfigureAwait(false);
                     }
                     else
                     {

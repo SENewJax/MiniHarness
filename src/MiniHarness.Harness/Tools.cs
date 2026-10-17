@@ -102,8 +102,10 @@ namespace MiniHarness.Harness
 
         public async Task<ToolResult> ExecuteAsync(ITool tool, ToolCall call, CancellationToken cancellationToken)
         {
+            int timeoutSeconds = tool is IToolTimeout custom && custom.TimeoutSeconds > 0
+                ? custom.TimeoutSeconds : options.ToolTimeoutSeconds;
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeout.CancelAfter(TimeSpan.FromSeconds(options.ToolTimeoutSeconds));
+            timeout.CancelAfter(TimeSpan.FromSeconds(timeoutSeconds));
             try
             {
                 using var arguments = JsonDocument.Parse(call.Arguments);

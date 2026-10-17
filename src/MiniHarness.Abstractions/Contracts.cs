@@ -26,6 +26,14 @@ namespace MiniHarness.Abstractions
         Task<string> ExecuteAsync(JsonElement arguments, CancellationToken cancellationToken);
     }
 
+    // Tools that legitimately run longer than the default tool timeout
+    // (for example build/test execution) declare their own ceiling. The
+    // executor still owns the hard cancellation; this only widens the bound.
+    public interface IToolTimeout
+    {
+        int TimeoutSeconds { get; }
+    }
+
     public interface IToolRegistry
     {
         IReadOnlyList<ToolDefinition> Definitions { get; }
