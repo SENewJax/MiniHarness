@@ -102,7 +102,15 @@ namespace MiniHarness.Coding
                     var drainFinish = Task.WhenAll(stdoutTask, stderrTask);
                     var drainDeadline = Task.Delay(TimeSpan.FromSeconds(2));
                     if (await Task.WhenAny(drainFinish, drainDeadline).ConfigureAwait(false) != drainFinish)
-                        await drainFinish.ContinueWith(_ => { }, TaskScheduler.Default).ConfigureAwait(false);
+                    {
+                        // The 2s ceiling is a hard bound, not a hint. The tree is
+                        // confirmed dead, so force the pipes shut (aborting any stuck
+                        // read) and observe the drain tasks in the background. They are
+                        // never awaited again: a wedged reader cannot delay reporting.
+                        ForcePipesClosed(process);
+                        _ = drainFinish.ContinueWith(t => { var observed = t.Exception; },
+                            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously);
+                    }
 
                     int elapsed = Elapsed(started);
                     if (!killed)
@@ -158,6 +166,15 @@ namespace MiniHarness.Coding
                 return process.HasExited;
             }
             catch (OperationCanceledException) { return false; }
+        }
+
+        // Hard-stop the redirected readers. Called only after kill confirmation
+        // and the drain deadline, when the tree is already dead: closing the
+        // streams aborts a stuck ReadAsync so reporting is not held hostage.
+        private static void ForcePipesClosed(System.Diagnostics.Process process)
+        {
+            try { process.StandardOutput.Close(); } catch (Exception ex) when (ex is IOException or InvalidOperationException or ObjectDisposedException) { }
+            try { process.StandardError.Close(); } catch (Exception ex) when (ex is IOException or InvalidOperationException or ObjectDisposedException) { }
         }
 
         private static async Task Drain(StreamReader reader, LimitedBuffer sink, CancellationToken cancellationToken)

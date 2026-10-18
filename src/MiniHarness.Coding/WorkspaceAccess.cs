@@ -10,7 +10,7 @@ namespace MiniHarness.Coding
     // Expected, model-correctable workspace failures. These are returned to the
     // model as failed tool observations with no effect; they never escape into
     // the runtime's Unknown/reconciliation path.
-    public sealed class WorkspaceAccessException : Exception
+    public class WorkspaceAccessException : Exception
     {
         public WorkspaceAccessException(string message) : base(message) { }
     }

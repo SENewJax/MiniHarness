@@ -11,10 +11,22 @@ namespace MiniHarness.Coding
     {
         private const int Context = 3;
 
+        // Resource ceiling for the O(n*m) LCS table. A byte size limit on files
+        // does not bound line counts (two 10k-line files would be ~400MB of
+        // ints), so the matrix size is gated independently. Above it we degrade
+        // to an O(n+m) line-set summary instead of risking an OOM.
+        private const int MaxLcsSideLines = 4_000;
+        private const long MaxLcsCells = 4_000_000L; // ~16 MB of ints plus arrays
+        private const int SummarySampleLines = 40;
+        private const int SummaryLineChars = 200;
+
         public static string Unified(string relativePath, string before, string after, int maxChars)
         {
             string[] a = Split(before);
             string[] b = Split(after);
+
+            if (AboveLcsCeiling(a.Length, b.Length))
+                return Cap(Summary(relativePath, a, b), maxChars);
 
             // Edit script via longest common subsequence.
             bool[] keepA, keepB;
@@ -90,6 +102,73 @@ namespace MiniHarness.Coding
             }
 
             return Cap(sb.ToString(), maxChars);
+        }
+
+        private static bool AboveLcsCeiling(int n, int m) =>
+            n > MaxLcsSideLines || m > MaxLcsSideLines || (long)n * m > MaxLcsCells;
+
+        // O(n+m) degraded rendering for files too large for the LCS matrix. It
+        // reports the scale of the change (removed/added line multisets) with
+        // bounded samples, so a huge file still yields a reviewable summary
+        // without allocating the quadratic table.
+        private static string Summary(string relativePath, string[] a, string[] b)
+        {
+            var countsA = LineCounts(a);
+            var countsB = LineCounts(b);
+            var removed = new List<string>();
+            var added = new List<string>();
+            foreach (var kv in countsA)
+            {
+                countsB.TryGetValue(kv.Key, out int other);
+                int delta = kv.Value - other;
+                for (int i = 0; i < delta; i++) removed.Add(kv.Key);
+            }
+            foreach (var kv in countsB)
+            {
+                countsA.TryGetValue(kv.Key, out int other);
+                int delta = kv.Value - other;
+                for (int i = 0; i < delta; i++) added.Add(kv.Key);
+            }
+
+            var sb = new StringBuilder();
+            sb.Append("--- a/").Append(relativePath).Append('\n');
+            sb.Append("+++ b/").Append(relativePath).Append('\n');
+            if (removed.Count == 0 && added.Count == 0)
+            {
+                sb.Append("(no content difference)\n");
+                return sb.ToString();
+            }
+            sb.Append("[large diff: line-aligned LCS skipped to bound memory; showing a multiset summary]\n");
+            sb.Append("old lines: ").Append(a.Length)
+              .Append(", new lines: ").Append(b.Length)
+              .Append(", removed-only: ").Append(removed.Count)
+              .Append(", added-only: ").Append(added.Count).Append('\n');
+            AppendSamples(sb, '-', "removed", removed);
+            AppendSamples(sb, '+', "added", added);
+            return sb.ToString();
+        }
+
+        private static Dictionary<string, int> LineCounts(string[] lines)
+        {
+            var map = new Dictionary<string, int>(StringComparer.Ordinal);
+            foreach (var line in lines) map[line] = map.TryGetValue(line, out int c) ? c + 1 : 1;
+            return map;
+        }
+
+        private static void AppendSamples(StringBuilder sb, char marker, string label, List<string> lines)
+        {
+            if (lines.Count == 0) return;
+            int shown = Math.Min(SummarySampleLines, lines.Count);
+            sb.Append(marker).Append(' ').Append(label).Append(" sample (").Append(shown)
+              .Append(" of ").Append(lines.Count).Append("):\n");
+            for (int i = 0; i < shown; i++)
+            {
+                string text = lines[i];
+                if (text.Length > SummaryLineChars) text = text.Substring(0, SummaryLineChars) + "...";
+                sb.Append(marker).Append(text).Append('\n');
+            }
+            if (lines.Count > shown)
+                sb.Append(marker).Append(" ... ").Append(lines.Count - shown).Append(" more\n");
         }
 
         private static string Range(int start, int count) =>

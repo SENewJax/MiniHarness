@@ -23,6 +23,8 @@ namespace MiniHarness.Tests
             tests.Add(("[v1-mutation] stale hash and ambiguous patch are rejected without mutation", PatchGuardScenario));
             tests.Add(("[v1-mutation] unique patch replaces once, keeps CRLF and records before/after", PatchSuccessScenario));
             tests.Add(("[v1-mutation] a bookkeeping failure after a confirmed write is Unknown, never Effect.None", LedgerFaultScenario));
+            tests.Add(("[v1-mutation] a corrupt ledger is refused before the write; a post-write corrupt record is Unknown", CorruptLedgerScenario));
+            tests.Add(("[v1-mutation] a very large diff degrades to a bounded summary instead of an LCS matrix", LargeDiffScenario));
             tests.Add(("[v1-tool] per-tool timeout override escapes the default ceiling", ToolTimeoutScenario));
         }
 
@@ -336,6 +338,84 @@ namespace MiniHarness.Tests
                 // A genuinely failed move with the file still absent stays Effect.None
                 // (pre-write failure), proving the failure kinds are distinguished.
                 ws.Ledger.PersistFault = null;
+            }
+            finally { if (Directory.Exists(ws.Dir)) Directory.Delete(ws.Dir, true); }
+        }
+
+        // Regression: a corrupt changes.json must never produce a confirmed write
+        // reported as Effect.None. It is refused up front (file untouched); and if
+        // the ledger turns corrupt between the read and the post-write record, the
+        // real change is reported Unknown/unrecorded.
+        private static async Task CorruptLedgerScenario()
+        {
+            var ws = Setup(WorkspaceGrants.Read, WorkspaceGrants.Write);
+            try
+            {
+                string ledgerFile = Path.Combine(ws.State, "task_demo", "changes.json");
+                Directory.CreateDirectory(Path.GetDirectoryName(ledgerFile)!);
+
+                // (1) Pre-existing corruption: both mutation tools refuse before any
+                // filesystem change, so Failed/Effect.None is truthful and the
+                // feedback names the corrupt ledger.
+                File.WriteAllText(ledgerFile, "{ this is not valid json ");
+                var create = await new CreateFileTool(ws.Ledger).ExecuteAsync(
+                    Args(JsonSerializer.Serialize(new { path = "a.txt", content = "alpha" })), Context(ws), default);
+                Check.Equal(ToolCallStatus.Failed, create.Status);
+                Check.Equal(EffectState.None, create.Effect);
+                Check.True(!File.Exists(Path.Combine(ws.Root, "a.txt")), "no file may be written while the ledger is unreadable");
+                Check.True(create.Output.Contains("corrupt", StringComparison.OrdinalIgnoreCase), "failure must name the corrupt ledger");
+
+                File.WriteAllText(Path.Combine(ws.Root, "b.txt"), "v1\n");
+                string hb = WorkspaceAccess.HashBytes(File.ReadAllBytes(Path.Combine(ws.Root, "b.txt")));
+                var patch = await new ApplyPatchTool(ws.Ledger).ExecuteAsync(
+                    Args(JsonSerializer.Serialize(new { path = "b.txt", expected_hash = hb, old_text = "v1", new_text = "v2" })), Context(ws), default);
+                Check.Equal(ToolCallStatus.Failed, patch.Status);
+                Check.Equal(EffectState.None, patch.Effect);
+                Check.True(File.ReadAllText(Path.Combine(ws.Root, "b.txt")) == "v1\n", "patch must be refused before writing");
+
+                // (2) After manual reconciliation (ledger removed), writes work again.
+                File.Delete(ledgerFile);
+                var recovered = await new CreateFileTool(ws.Ledger).ExecuteAsync(
+                    Args(JsonSerializer.Serialize(new { path = "a.txt", content = "alpha" })), Context(ws), default);
+                Check.Equal(ToolCallStatus.Succeeded, recovered.Status);
+
+                // (3) Ledger becomes corrupt BETWEEN the pre-write read and the
+                // post-write record save: the file is real, so the effect is Unknown,
+                // never Effect.None (the exact fault this regression was filed for).
+                ws.Ledger.PersistFault = new LedgerCorruptException("simulated corruption between read and save");
+                var late = await new CreateFileTool(ws.Ledger).ExecuteAsync(
+                    Args(JsonSerializer.Serialize(new { path = "c.txt", content = "gamma" })), Context(ws), default);
+                Check.Equal(ToolCallStatus.Failed, late.Status);
+                Check.Equal(EffectState.Unknown, late.Effect);
+                Check.True(File.Exists(Path.Combine(ws.Root, "c.txt")) &&
+                    File.ReadAllText(Path.Combine(ws.Root, "c.txt")) == "gamma", "the written file must really exist");
+                Check.True(late.Output.Contains("unrecorded", StringComparison.OrdinalIgnoreCase));
+                ws.Ledger.PersistFault = null;
+            }
+            finally { if (Directory.Exists(ws.Dir)) Directory.Delete(ws.Dir, true); }
+        }
+
+        // Regression: the line LCS matrix is O(n*m). Files under the byte cap can
+        // still hold thousands of lines, so above the cell ceiling get_changes must
+        // degrade to an O(n+m) summary instead of allocating a hundreds-of-MB table.
+        private static async Task LargeDiffScenario()
+        {
+            var ws = Setup(WorkspaceGrants.Read, WorkspaceGrants.Write);
+            try
+            {
+                var sb = new StringBuilder();
+                for (int i = 0; i < 5_000; i++) sb.Append("line ").Append(i).Append('\n');
+                var create = await new CreateFileTool(ws.Ledger).ExecuteAsync(
+                    Args(JsonSerializer.Serialize(new { path = "big.txt", content = sb.ToString() })), Context(ws), default);
+                Check.Equal(ToolCallStatus.Succeeded, create.Status);
+
+                var changes = await new GetChangesTool(ws.Ledger).ExecuteAsync(Args("{}"), Context(ws), default);
+                using var doc = JsonDocument.Parse(changes.Output);
+                string diff = doc.RootElement.GetProperty("changes").EnumerateArray().Single().GetProperty("diff").GetString()!;
+                Check.True(diff.Contains("[large diff", StringComparison.Ordinal), "oversized alignment must degrade to a summary");
+                Check.True(diff.Contains("added-only: 5000", StringComparison.Ordinal), "summary must quantify the change");
+                Check.True(diff.Contains("sample", StringComparison.Ordinal), "summary must carry bounded samples");
+                Check.True(diff.Length < 20_000, "summary output stays bounded regardless of line count");
             }
             finally { if (Directory.Exists(ws.Dir)) Directory.Delete(ws.Dir, true); }
         }

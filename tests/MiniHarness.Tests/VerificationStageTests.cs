@@ -18,6 +18,7 @@ namespace MiniHarness.Tests
             tests.Add(("[v1-process] exit code, chatter drain, stderr and start failure are distinguished", ProcessScenario));
             tests.Add(("[v1-process] timeout kills the one-shot process and reports it", TimeoutScenario));
             tests.Add(("[v1-process] user cancellation reclaims the process and its child tree", CancellationScenario));
+            tests.Add(("[v1-process] cancelling a still-chatting process reclaims it within a hard wall-clock bound", CancellationDrainBoundScenario));
             tests.Add(("[v1-verify] profile pass/fail evidence is bound to the real exit code and revision", VerificationScenario));
             tests.Add(("[v1-verify] zero-test and missing marker do not produce passing evidence", ZeroTestScenario));
             tests.Add(("[v1-verify] a change during the run invalidates passing evidence", ChangeDuringRunScenario));
@@ -123,6 +124,53 @@ namespace MiniHarness.Tests
                 {
                     if (pid > 0) { try { System.Diagnostics.Process.GetProcessById(pid).Kill(true); } catch { } }
                 }
+                if (Directory.Exists(dir)) Directory.Delete(dir, true);
+            }
+        }
+
+        // Regression for the drain cleanup bound. Previously, after the 2s drain
+        // deadline the code still awaited the drain tasks unconditionally, so a
+        // reader that never finished could delay cancellation indefinitely. The
+        // child is still flooding stdout when cancelled: the whole call must
+        // (a) propagate OCE, (b) reclaim the real OS process, and (c) finish inside
+        // a hard wall-clock bound (kill confirmation 5s + drain ceiling 2s).
+        // Note: once the tree is dead the OS closes the pipes and healthy readers
+        // end on EOF; the deadline branch is defensive against a wedged read that
+        // cannot be deterministically reproduced in-process, so this asserts the
+        // observable bounded contract rather than faking an internal stuck state.
+        private static async Task CancellationDrainBoundScenario()
+        {
+            string dir = Path.Combine(Path.GetTempPath(), "miniharness-v1-drain-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            int pid = 0;
+            try
+            {
+                var runner = new ProcessRunner();
+                string pidFile = Path.Combine(dir, "chatter.pid");
+                var cts = new CancellationTokenSource();
+                var watch = System.Diagnostics.Stopwatch.StartNew();
+                var run = Task.Run(() => runner.RunAsync(new ProcessSpecification
+                {
+                    FileName = Exe, Arguments = new[] { "--self", "chatter-forever", pidFile },
+                    WorkingDirectory = Path.GetTempPath(), TimeoutSeconds = 60, MaxOutputBytes = 50_000
+                }, cts.Token));
+
+                // Let it actually start flooding the pipe before cancelling.
+                await WaitForFileAsync(pidFile);
+                pid = int.Parse(await File.ReadAllTextAsync(pidFile));
+                Check.True(IsAlive(pid), "chatting child must be running before cancellation");
+                cts.Cancel();
+                await ExpectCancellationAsync(run);
+                watch.Stop();
+                Check.True(watch.Elapsed < TimeSpan.FromSeconds(10),
+                    "cancelled cleanup must be bounded by kill+drain ceilings, took " + watch.Elapsed);
+                Check.True(await WaitDeadAsync(pid, TimeSpan.FromSeconds(8)),
+                    "the still-chatting child must be reclaimed, not orphaned");
+                pid = 0;
+            }
+            finally
+            {
+                if (pid > 0) { try { System.Diagnostics.Process.GetProcessById(pid).Kill(true); } catch { } }
                 if (Directory.Exists(dir)) Directory.Delete(dir, true);
             }
         }

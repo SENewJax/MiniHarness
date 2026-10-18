@@ -65,6 +65,14 @@ namespace MiniHarness.Tests
                     int lines = int.TryParse(value, out lines) ? lines : 0;
                     for (int i = 0; i < lines; i++) Console.WriteLine("line " + i + " " + new string('x', 64));
                     return 0;
+                case "chatter-forever":
+                    // Emit continuously until killed. Used to prove the interrupted
+                    // cleanup path has a hard wall-clock ceiling even while pipes are
+                    // still carrying data at cancellation time. Optional argument is a
+                    // pid file so callers can track/reap the real OS process.
+                    string foreverPid = args.Length > 2 ? args[2] : "";
+                    if (foreverPid.Length > 0) System.IO.File.WriteAllText(foreverPid, Environment.ProcessId.ToString());
+                    while (true) { Console.WriteLine("forever " + new string('y', 64)); Thread.Sleep(5); }
                 case "tests":
                     int count = int.TryParse(value, out count) ? count : 0;
                     Console.WriteLine("Tests run: " + count);

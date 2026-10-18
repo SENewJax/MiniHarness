@@ -38,6 +38,11 @@ namespace MiniHarness.Coding
             byte[] bytes = new UTF8Encoding(false).GetBytes(content);
             if (bytes.Length > Options.MaxFileBytes) return Task.FromResult(Fail("Content exceeds the file size limit."));
 
+            // Refuse the write while bookkeeping is unreadable: Effect.None is then
+            // truthful because the workspace is provably untouched.
+            try { ledger.EnsureReadable(context.TaskId); }
+            catch (WorkspaceAccessException ex) { return Task.FromResult(Fail(ex.Message)); }
+
             // Temp file in the same directory then atomic replace; never a partial target.
             string tmp = full + ".mh-tmp-" + Guid.NewGuid().ToString("N");
             string rel = access.GetRelative(full);
@@ -75,7 +80,7 @@ namespace MiniHarness.Coding
             {
                 ledger.RecordAdded(context.TaskId, rel, hash, context);
             }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or LedgerCorruptException)
             {
                 return WrittenButUnrecorded(rel, hash, ex.Message);
             }
@@ -142,6 +147,11 @@ namespace MiniHarness.Coding
             byte[] newBytes = Reencode(current, updated);
             if (newBytes.Length > Options.MaxFileBytes) return Task.FromResult(Fail("Resulting file exceeds the size limit; no change was made."));
 
+            // Refuse while bookkeeping is unreadable, before any snapshot or write:
+            // a corrupt ledger must not surface as "no effect" after a real edit.
+            try { ledger.EnsureReadable(context.TaskId); }
+            catch (WorkspaceAccessException ex) { return Task.FromResult(Fail(ex.Message)); }
+
             // Snapshot the pre-edit bytes (first-touch baseline) BEFORE replacing.
             string baselineHash = ledger.EnsureBaseline(context.TaskId, access.GetRelative(full), current.Bytes);
 
@@ -185,7 +195,7 @@ namespace MiniHarness.Coding
             {
                 ledger.RecordModified(context.TaskId, rel, baselineHash, afterHash, context);
             }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or LedgerCorruptException)
             {
                 return WrittenButUnrecorded(rel, afterHash, ex.Message);
             }

@@ -20,6 +20,15 @@ namespace MiniHarness.Coding
         public long UpdatedAt { get; set; }
     }
 
+    // A corrupt changes.json is a pre-existing state defect, not a workspace IO
+    // fault. Subclassing WorkspaceAccessException keeps it a corrective failure
+    // for the model, while letting write tools tell "ledger was unreadable
+    // before the write" apart from "ledger record failed after the write".
+    public sealed class LedgerCorruptException : WorkspaceAccessException
+    {
+        public LedgerCorruptException(string message) : base(message) { }
+    }
+
     internal sealed class LedgerFile
     {
         public List<ChangeRecord> Changes { get; set; } = new List<ChangeRecord>();
@@ -69,8 +78,19 @@ namespace MiniHarness.Coding
         {
             string path = LedgerPath(taskId);
             if (!File.Exists(path)) return new LedgerFile();
+            // Malformed JSON is a corrupt-state defect (LedgerCorruptException);
+            // raw IO errors propagate unchanged so callers can place them pre/post
+            // the workspace write instead of collapsing all bookkeeping failures.
             try { return JsonSerializer.Deserialize<LedgerFile>(File.ReadAllText(path), Json) ?? new LedgerFile(); }
-            catch (JsonException) { throw new WorkspaceAccessException("Change ledger is corrupt for this task; manual reconciliation required."); }
+            catch (JsonException) { throw new LedgerCorruptException("Change ledger is corrupt for this task; manual reconciliation required."); }
+        }
+
+        // Pre-write gate. A mutation is refused while the ledger cannot be read,
+        // so a corrupt or unreadable changes.json is reported while the workspace
+        // is provably untouched (Effect.None), never after the file has changed.
+        public void EnsureReadable(string taskId)
+        {
+            lock (Gate(taskId)) { Load(taskId); }
         }
 
         private void Save(string taskId, LedgerFile ledger)
