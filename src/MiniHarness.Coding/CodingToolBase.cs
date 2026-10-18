@@ -54,6 +54,24 @@ namespace MiniHarness.Coding
             Status = ToolCallStatus.Failed, Output = message, Effect = EffectState.None
         };
 
+        // The target file was changed (or its state cannot be ruled out), even
+        // though the operation is reported as failed. Effect.Unknown drives the
+        // runtime into reconciliation rather than falsely claiming "no effect"
+        // and allowing an automatic, possibly destructive retry.
+        protected static ToolOutcome Uncertain(string message) => new ToolOutcome
+        {
+            Status = ToolCallStatus.Failed, Output = message, Effect = EffectState.Unknown
+        };
+
+        // Write was confirmed on disk, but bookkeeping (the out-of-workspace change
+        // ledger) failed afterwards. The code change is real; only its record is
+        // missing, so this is an uncertain effect requiring reconciliation, never
+        // Effect.None. The message carries the confirmed hash to aid reconciliation.
+        protected static ToolOutcome WrittenButUnrecorded(string relativePath, string confirmedHash, string detail) => Uncertain(
+            "File was written and confirmed (" + relativePath + ", sha256=" + confirmedHash +
+            "), but the change record could not be persisted, so the effect is unrecorded. " +
+            "Reconcile the file state; do not re-apply the edit blindly. Underlying error: " + detail);
+
         protected static ToolOutcome Ok(string output) => new ToolOutcome
         {
             Status = ToolCallStatus.Succeeded, Output = output, Effect = EffectState.None

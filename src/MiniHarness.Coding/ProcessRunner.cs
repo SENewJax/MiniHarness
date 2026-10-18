@@ -35,8 +35,9 @@ namespace MiniHarness.Coding
     /// <summary>
     /// One-shot, argument-based process execution. No shell, no interaction.
     /// stdout/stderr are drained concurrently so a chatty test run cannot
-    /// deadlock on a full pipe. A timeout kills the whole process tree and
-    /// waits for exit confirmation; failure to confirm is reported, not hidden.
+    /// deadlock on a full pipe. Both a timeout AND a user cancellation kill the
+    /// whole process tree and wait for exit confirmation before reporting;
+    /// failure to confirm termination is reported (KillUnconfirmed), never hidden.
     /// </summary>
     public sealed class ProcessRunner
     {
@@ -71,6 +72,7 @@ namespace MiniHarness.Coding
                 var stdoutTask = Task.Run(() => Drain(process.StandardOutput, stdout, drainCts.Token));
                 var stderrTask = Task.Run(() => Drain(process.StandardError, stderr, drainCts.Token));
 
+                bool interrupted = false;
                 bool timedOut = false;
                 using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(Math.Max(1, spec.TimeoutSeconds)));
                 using var combined = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
@@ -80,23 +82,47 @@ namespace MiniHarness.Coding
                 }
                 catch (OperationCanceledException)
                 {
-                    if (cancellationToken.IsCancellationRequested) throw;
-                    timedOut = true;
+                    // Both a user cancellation and our own timeout interrupt the wait.
+                    // The process is reclaimed below in either case; distinguishing why
+                    // only changes how the outcome is reported afterwards.
+                    interrupted = true;
+                    timedOut = !cancellationToken.IsCancellationRequested;
                 }
 
-                if (timedOut)
+                if (interrupted)
                 {
-                    var kill = await TryKillTreeAsync(process).ConfigureAwait(false);
-                    await Task.WhenAll(stdoutTask, stderrTask).ContinueWith(_ => { }, TaskScheduler.Default).ConfigureAwait(false);
+                    // Bounded termination + exit confirmation is shared by timeout and
+                    // user cancellation so an aborted build/test cannot keep running
+                    // (or mutating files) after the task reports it has stopped.
+                    bool killed = await TryKillTreeAsync(process).ConfigureAwait(false);
+
+                    // Stop the pipe readers, then wait only briefly: a dead child must
+                    // not hang cancellation forever, but we still collect what drained.
                     drainCts.Cancel();
+                    var drainFinish = Task.WhenAll(stdoutTask, stderrTask);
+                    var drainDeadline = Task.Delay(TimeSpan.FromSeconds(2));
+                    if (await Task.WhenAny(drainFinish, drainDeadline).ConfigureAwait(false) != drainFinish)
+                        await drainFinish.ContinueWith(_ => { }, TaskScheduler.Default).ConfigureAwait(false);
+
                     int elapsed = Elapsed(started);
-                    if (!kill)
+                    if (!killed)
+                    {
+                        // Termination could not be confirmed: surface uncertain side
+                        // effects instead of throwing, so the runtime enters
+                        // reconciliation rather than assuming the tree is gone.
                         return new ProcessRunResult
                         {
                             State = ProcessOutcomeState.KillUnconfirmed,
                             StandardOutput = stdout.Text, StandardError = stderr.Text,
                             OutputTruncated = stdout.Truncated || stderr.Truncated, ElapsedMilliseconds = elapsed
                         };
+                    }
+
+                    // The tree is confirmed gone. A timeout is a structured result; a
+                    // user cancellation propagates the OCE after reclamation succeeds.
+                    if (cancellationToken.IsCancellationRequested && !timedOut)
+                        throw new OperationCanceledException("Process was cancelled after its process tree was terminated.", cancellationToken);
+
                     return new ProcessRunResult
                     {
                         State = ProcessOutcomeState.TimedOut,

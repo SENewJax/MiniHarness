@@ -18,9 +18,11 @@ namespace MiniHarness.Tests
         {
             tests.Add(("[v1-workspace] bounded read/search/list with hashes and skip rules", LocationScenario));
             tests.Add(("[v1-workspace] boundary, link, grant, binary and size rejections have no effect", BoundaryScenario));
+            tests.Add(("[v1-workspace] a symlinked FILE cannot read outside the root (skipped without privilege)", FileSymlinkScenario));
             tests.Add(("[v1-mutation] create refuses overwrite and ledger records agent-only changes", CreateAndLedgerScenario));
             tests.Add(("[v1-mutation] stale hash and ambiguous patch are rejected without mutation", PatchGuardScenario));
             tests.Add(("[v1-mutation] unique patch replaces once, keeps CRLF and records before/after", PatchSuccessScenario));
+            tests.Add(("[v1-mutation] a bookkeeping failure after a confirmed write is Unknown, never Effect.None", LedgerFaultScenario));
             tests.Add(("[v1-tool] per-tool timeout override escapes the default ceiling", ToolTimeoutScenario));
         }
 
@@ -131,6 +133,71 @@ namespace MiniHarness.Tests
             finally { Cleanup(ws); }
         }
 
+        // Final-path FILE symlinks need a privilege the current host may lack
+        // (SeCreateSymbolicLink / developer mode). We attempt the real link: when
+        // permitted this dynamically asserts the boundary rejection; when not, it is
+        // explicitly reported as SKIPPED rather than silently faked by a junction.
+        // The negative cases (normal file read still works; absent create target is
+        // allowed) run unconditionally so the new per-segment check is exercised.
+        private static async Task FileSymlinkScenario()
+        {
+            var ws = Setup(WorkspaceGrants.Read, WorkspaceGrants.Write);
+            string link = Path.Combine(ws.Root, "link.txt");
+            string outside = Path.Combine(Path.GetTempPath(), "mh-sym-secret-" + Guid.NewGuid().ToString("N") + ".txt");
+            bool linkCreated = false;
+            try
+            {
+                File.WriteAllText(outside, "SECRET-" + Guid.NewGuid().ToString("N"));
+
+                // (a) Negative coverage that runs everywhere: a normal file inside the
+                // root is readable and an absent name is resolvable (for create_file).
+                File.WriteAllText(Path.Combine(ws.Root, "plain.txt"), "plain");
+                var plain = await new ReadFileTool().ExecuteAsync(Args("{\"path\":\"plain.txt\"}"), Context(ws), default);
+                Check.Equal(ToolCallStatus.Succeeded, plain.Status);
+                var access = new WorkspaceAccess(ws.Scope);
+                Check.True(access.Resolve("does-not-exist.txt").Length > 0, "absent paths must remain resolvable for create_file");
+
+                // (b) Attempt the privileged file symlink.
+                linkCreated = TryCreateFileSymlink(link, outside);
+                if (!linkCreated)
+                {
+                    Console.WriteLine("SKIP: file symlink creation is not permitted for this account (needs admin/developer mode); boundary code path is present but not dynamically exercised here.");
+                    return;
+                }
+
+                // Resolve must reject the final-path link before bytes are read.
+                bool rejected = false;
+                try { new WorkspaceAccess(ws.Scope).Resolve("link.txt"); }
+                catch (WorkspaceAccessException) { rejected = true; }
+                Check.True(rejected, "a symlinked file inside the root must be rejected");
+
+                var viaTool = await new ReadFileTool().ExecuteAsync(Args("{\"path\":\"link.txt\"}"), Context(ws), default);
+                Check.Equal(ToolCallStatus.Failed, viaTool.Status);
+                Check.Equal(EffectState.None, viaTool.Effect);
+                Check.True(!viaTool.Output.Contains("SECRET-", StringComparison.Ordinal), "linked content outside the root must never be returned");
+            }
+            finally
+            {
+                if (linkCreated) { try { File.Delete(link); } catch { } }
+                if (File.Exists(outside)) File.Delete(outside);
+                if (Directory.Exists(ws.Dir)) Directory.Delete(ws.Dir, true);
+            }
+        }
+
+        private static bool TryCreateFileSymlink(string link, string target)
+        {
+            try
+            {
+                var psi = new System.Diagnostics.ProcessStartInfo("cmd", "/c mklink \"" + link + "\" \"" + target + "\"")
+                { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true };
+                using var p = System.Diagnostics.Process.Start(psi)!;
+                p.WaitForExit(5000);
+                return p.ExitCode == 0 &&
+                    (File.GetAttributes(link) & FileAttributes.ReparsePoint) != 0;
+            }
+            catch { return false; }
+        }
+
         private static bool TryCreateJunction(string link, string target)
         {
             try
@@ -162,8 +229,12 @@ namespace MiniHarness.Tests
 
                 var changes = await new GetChangesTool(ws.Ledger).ExecuteAsync(Args("{}"), Context(ws), default);
                 using var doc = JsonDocument.Parse(changes.Output);
-                var paths = doc.RootElement.GetProperty("changes").EnumerateArray().Select(c => c.GetProperty("path").GetString()).ToList();
+                var array = doc.RootElement.GetProperty("changes").EnumerateArray().ToList();
+                var paths = array.Select(c => c.GetProperty("path").GetString()).ToList();
                 Check.True(paths.Count == 1 && paths[0] == "agent.txt", "get_changes must list only agent files");
+                string addedDiff = array.Single().GetProperty("diff").GetString()!;
+                Check.True(addedDiff.Contains("+first", StringComparison.Ordinal) && !addedDiff.Contains("\n-", StringComparison.Ordinal),
+                    "an added file's diff is purely additive");
             }
             finally { if (Directory.Exists(ws.Dir)) Directory.Delete(ws.Dir, true); }
         }
@@ -217,6 +288,54 @@ namespace MiniHarness.Tests
                 var record = doc.RootElement.GetProperty("changes").EnumerateArray().Single();
                 Check.Equal(hash, record.GetProperty("beforeHash").GetString());
                 Check.Equal(WorkspaceAccess.HashBytes(File.ReadAllBytes(file)), record.GetProperty("afterHash").GetString());
+                string diff = record.GetProperty("diff").GetString()!;
+                Check.True(diff.StartsWith("--- a/code.cs", StringComparison.Ordinal), "diff names the changed file");
+                Check.True(diff.Contains("@@", StringComparison.Ordinal), "diff includes a hunk header");
+                Check.True(diff.Contains("-    int X = 1;", StringComparison.Ordinal), "diff shows the removed line");
+                Check.True(diff.Contains("+    int X = 2;", StringComparison.Ordinal), "diff shows the added line");
+            }
+            finally { if (Directory.Exists(ws.Dir)) Directory.Delete(ws.Dir, true); }
+        }
+
+        private static async Task LedgerFaultScenario()
+        {
+            var ws = Setup(WorkspaceGrants.Read, WorkspaceGrants.Write);
+            try
+            {
+                // (1) create_file: the target write succeeds and is confirmed, but the
+                // ledger save throws. The effect must be Unknown (real change, missing
+                // record), never Failed/Effect.None which would invite a blind retry.
+                ws.Ledger.PersistFault = new IOException("simulated ledger disk fault");
+                var create = await new CreateFileTool(ws.Ledger).ExecuteAsync(
+                    Args(JsonSerializer.Serialize(new { path = "a.txt", content = "alpha" })), Context(ws), default);
+                Check.Equal(ToolCallStatus.Failed, create.Status);
+                Check.Equal(EffectState.Unknown, create.Effect);
+                Check.True(File.Exists(Path.Combine(ws.Root, "a.txt")) &&
+                    File.ReadAllText(Path.Combine(ws.Root, "a.txt")) == "alpha", "the file change must really exist");
+                Check.True(create.Output.Contains("unrecorded", StringComparison.OrdinalIgnoreCase), "feedback must say the effect is unrecorded");
+
+                // (2) apply_patch: establish the baseline with the ledger healthy, then
+                // fault only the post-write record save (the existing baseline is reused
+                // without saving). File changes; effect must still be Unknown.
+                ws.Ledger.PersistFault = null;
+                string file = Path.Combine(ws.Root, "b.txt");
+                File.WriteAllText(file, "v1\n");
+                string h1 = WorkspaceAccess.HashBytes(File.ReadAllBytes(file));
+                var first = await new ApplyPatchTool(ws.Ledger).ExecuteAsync(
+                    Args(JsonSerializer.Serialize(new { path = "b.txt", expected_hash = h1, old_text = "v1", new_text = "v2" })), Context(ws), default);
+                Check.Equal(ToolCallStatus.Succeeded, first.Status);
+
+                ws.Ledger.PersistFault = new IOException("simulated ledger disk fault");
+                string h2 = WorkspaceAccess.HashBytes(File.ReadAllBytes(file));
+                var second = await new ApplyPatchTool(ws.Ledger).ExecuteAsync(
+                    Args(JsonSerializer.Serialize(new { path = "b.txt", expected_hash = h2, old_text = "v2", new_text = "v3" })), Context(ws), default);
+                Check.Equal(ToolCallStatus.Failed, second.Status);
+                Check.Equal(EffectState.Unknown, second.Effect);
+                Check.True(File.ReadAllText(file) == "v3\n", "the patched content must be on disk despite the ledger fault");
+
+                // A genuinely failed move with the file still absent stays Effect.None
+                // (pre-write failure), proving the failure kinds are distinguished.
+                ws.Ledger.PersistFault = null;
             }
             finally { if (Directory.Exists(ws.Dir)) Directory.Delete(ws.Dir, true); }
         }

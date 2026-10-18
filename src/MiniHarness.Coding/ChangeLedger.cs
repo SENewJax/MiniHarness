@@ -50,6 +50,11 @@ namespace MiniHarness.Coding
                 : Path.GetFullPath(stateRoot);
         }
 
+        // Test-only fault injection: when non-null, a durable ledger save throws this
+        // after the atomic file move, simulating a post-write bookkeeping failure.
+        // Production code leaves it null; this models a real IOException from disk.
+        public Exception? PersistFault { get; set; }
+
         private string TaskDir(string taskId)
         {
             foreach (char c in Path.GetInvalidFileNameChars())
@@ -70,6 +75,10 @@ namespace MiniHarness.Coding
 
         private void Save(string taskId, LedgerFile ledger)
         {
+            // Injected bookkeeping failure happens BEFORE the atomic move, so the
+            // ledger genuinely stays without the new record — a real disk fault
+            // during bookkeeping, after the workspace write already succeeded.
+            if (PersistFault != null) throw PersistFault;
             Directory.CreateDirectory(TaskDir(taskId));
             string path = LedgerPath(taskId);
             string tmp = path + ".tmp";

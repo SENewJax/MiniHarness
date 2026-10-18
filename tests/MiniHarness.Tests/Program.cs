@@ -24,11 +24,12 @@ namespace MiniHarness.Tests
             TaskStageTests.Register(tests);
             CodingStageTests.Register(tests);
             VerificationStageTests.Register(tests);
+            CodingCompletionPolicyStageTests.Register(tests);
             CodingEndToEndStageTests.Register(tests);
             string stage = args.Length == 2 && args[0] == "--stage" ? args[1] : "all";
             if (args.Length != 0 && (args.Length != 2 || args[0] != "--stage"))
             {
-                Console.WriteLine("Usage: --stage all|legacy|1|2|3|4-5|6|v0-control|v0-replan|v0-resource|v0-child|v1-workspace|v1-mutation|v1-tool|v1-process|v1-verify|v1-e2e"); return 2;
+                Console.WriteLine("Usage: --stage all|legacy|1|2|3|4-5|6|v0-control|v0-replan|v0-resource|v0-child|v1-workspace|v1-mutation|v1-tool|v1-process|v1-verify|v1-policy|v1-e2e"); return 2;
             }
             tests = tests.FindAll(t => stage == "all" || (stage == "legacy" ? !t.Name.StartsWith("[", StringComparison.Ordinal)
                 : t.Name.StartsWith("[" + stage + "]", StringComparison.Ordinal)));
@@ -71,6 +72,31 @@ namespace MiniHarness.Tests
                 case "sleep":
                     int seconds = int.TryParse(value, out seconds) ? seconds : 30;
                     Thread.Sleep(TimeSpan.FromSeconds(seconds));
+                    return 0;
+                case "sleep-pid":
+                    // Write this process id, then sleep. A cancellation test uses the
+                    // pid file to assert the real process (not just the handle) died.
+                    string pidFile = args.Length > 2 ? args[2] : "";
+                    int pidSeconds = args.Length > 3 && int.TryParse(args[3], out int ps) ? ps : 30;
+                    if (pidFile.Length > 0) System.IO.File.WriteAllText(pidFile, Environment.ProcessId.ToString());
+                    Thread.Sleep(TimeSpan.FromSeconds(pidSeconds));
+                    return 0;
+                case "spawn-sleep":
+                    // Spawn a detached grandchild that writes its own pid and sleeps,
+                    // then sleep in the parent. Killing only the parent would orphan
+                    // the grandchild; tree kill must reclaim both.
+                    string childPid = args.Length > 2 ? args[2] : "";
+                    int treeSeconds = args.Length > 3 && int.TryParse(args[3], out int ts) ? ts : 30;
+                    var child = new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = Environment.ProcessPath!,
+                        Arguments = "--self sleep-pid \"" + childPid + "\" " + treeSeconds,
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    };
+                    System.Diagnostics.Process.Start(child);
+                    if (childPid.Length > 0) System.IO.File.WriteAllText(childPid + ".parent", Environment.ProcessId.ToString());
+                    Thread.Sleep(TimeSpan.FromSeconds(treeSeconds));
                     return 0;
                 case "touch":
                     System.IO.File.WriteAllText(value, "changed during verification\n");

@@ -80,8 +80,13 @@ namespace MiniHarness.Coding
             if (!IsWithinRoot(full))
                 throw new WorkspaceAccessException("Path escapes the authorized workspace: " + relative);
 
-            // Walk every existing component from the root down and reject links,
-            // so a junction placed after authorization cannot redirect access.
+            // Walk every component from the root down — INCLUDING the final file
+            // itself — and reject reparse points. The previous Directory.Exists
+            // guard skipped a symlinked FILE (a file is not a directory), letting a
+            // final-path symlink read outside the root. IsReparsePoint queries the
+            // directory entry itself (it does not follow the link); a genuinely
+            // absent path throws FileNotFoundException and is treated as allowed so
+            // create_file can target a not-yet-existing name.
             var segments = new List<string>();
             for (string? current = full; current != null && current.Length >= root.Length; current = Directory.GetParent(current)?.FullName)
             {
@@ -89,7 +94,7 @@ namespace MiniHarness.Coding
                 segments.Add(current);
             }
             foreach (string segment in Enumerable.Reverse(segments))
-                if (Directory.Exists(segment) && IsReparsePoint(segment))
+                if (IsReparsePoint(segment))
                     throw new WorkspaceAccessException("Linked paths are not permitted inside the workspace: " + relative);
             return full;
         }

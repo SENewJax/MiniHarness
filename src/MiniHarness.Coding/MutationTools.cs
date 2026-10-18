@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -39,16 +40,55 @@ namespace MiniHarness.Coding
 
             // Temp file in the same directory then atomic replace; never a partial target.
             string tmp = full + ".mh-tmp-" + Guid.NewGuid().ToString("N");
+            string rel = access.GetRelative(full);
+            string hash = WorkspaceAccess.HashBytes(bytes);
+            bool moved = false;
             try
             {
                 File.WriteAllBytes(tmp, bytes);
                 File.Move(tmp, full, overwrite: false);
+                moved = true;
             }
-            finally { TryDelete(tmp); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // The move reported failure: verify what actually reached disk instead
+                // of assuming "no effect". Only a confirmed absence is Effect.None.
+                string disk = ReadHashOrEmpty(full);
+                if (disk.Length == 0) return Task.FromResult(Fail("Could not create file and it is absent on disk: " + ex.GetType().Name + ": " + ex.Message));
+                if (disk == hash) return Task.FromResult(RecordAddedOrUncertain(ledger, context, full, rel, hash, bytes.Length));
+                return Task.FromResult(Uncertain("Create failed and the existing file differs from both the attempt and the expected absence; verify state. " + ex.Message));
+            }
+            finally { if (!moved) TryDelete(tmp); }
 
-            string hash = WorkspaceAccess.HashBytes(bytes);
-            ledger.RecordAdded(context.TaskId, access.GetRelative(full), hash, context);
-            return Task.FromResult(Ok(ToJson(new { path = access.GetRelative(full), hash, status = "added", bytes = bytes.Length })));
+            return Task.FromResult(RecordAddedOrUncertain(ledger, context, full, rel, hash, bytes.Length));
+        }
+
+        // Confirm the freshly written bytes, then record them. A ledger failure must
+        // surface as an unrecorded-but-confirmed effect (Unknown), never Effect.None.
+        private static ToolOutcome RecordAddedOrUncertain(ChangeLedger ledger, ToolExecutionContext context,
+            string full, string rel, string hash, int length)
+        {
+            string disk = ReadHashOrEmpty(full);
+            if (disk != hash)
+                return Uncertain("Write result could not be confirmed on disk for " + rel + "; verify before retrying.");
+            try
+            {
+                ledger.RecordAdded(context.TaskId, rel, hash, context);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                return WrittenButUnrecorded(rel, hash, ex.Message);
+            }
+            return Ok(ToJson(new { path = rel, hash, status = "added", bytes = length }));
+        }
+
+        // Hash of an existing file, or "" when it is absent/unreadable. Used to tell
+        // a confirmed write apart from a confirmed absence after a failed move.
+        internal static string ReadHashOrEmpty(string full)
+        {
+            try { return File.Exists(full) ? WorkspaceAccess.HashBytes(File.ReadAllBytes(full)) : ""; }
+            catch (IOException) { return ""; }
+            catch (UnauthorizedAccessException) { return ""; }
         }
 
         internal static void TryDelete(string path) { try { if (File.Exists(path)) File.Delete(path); } catch (IOException) { } }
@@ -105,36 +145,52 @@ namespace MiniHarness.Coding
             // Snapshot the pre-edit bytes (first-touch baseline) BEFORE replacing.
             string baselineHash = ledger.EnsureBaseline(context.TaskId, access.GetRelative(full), current.Bytes);
 
+            string rel = access.GetRelative(full);
+            string afterHash = WorkspaceAccess.HashBytes(newBytes);
             string tmp = full + ".mh-tmp-" + Guid.NewGuid().ToString("N");
+            bool moved = false;
             try
             {
                 File.WriteAllBytes(tmp, newBytes);
                 File.Move(tmp, full, overwrite: true);
+                moved = true;
             }
-            catch (IOException)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
                 TryDelete(tmp);
-                // Destination may or may not have been replaced: signal an unknown
-                // effect so the runtime asks for reconciliation rather than retrying.
-                return Task.FromResult(Uncertain("Write could not be confirmed; verify the file state before retrying."));
+                // The move reported failure: inspect the destination instead of
+                // guessing. New content present => confirmed change; old content
+                // intact => no effect; anything else => unknown, reconcile.
+                string disk = CreateFileTool.ReadHashOrEmpty(full);
+                if (disk == afterHash)
+                    return Task.FromResult(RecordModifiedOrUncertain(ledger, context, full, rel, current.Hash, baselineHash, afterHash));
+                if (disk == current.Hash)
+                    return Task.FromResult(Fail("Patch was not applied; the file is unchanged on disk: " + ex.Message));
+                return Task.FromResult(Uncertain("Write could not be confirmed; the destination is neither the old nor the new content. Verify the file state before retrying. " + ex.Message));
             }
-            finally { TryDelete(tmp); }
+            finally { if (!moved) TryDelete(tmp); }
 
-            string afterHash = WorkspaceAccess.HashBytes(newBytes);
-            ledger.RecordModified(context.TaskId, access.GetRelative(full), baselineHash, afterHash, context);
-            return Task.FromResult(Ok(ToJson(new
-            {
-                path = access.GetRelative(full),
-                beforeHash = current.Hash,
-                afterHash,
-                status = "modified"
-            })));
+            return Task.FromResult(RecordModifiedOrUncertain(ledger, context, full, rel, current.Hash, baselineHash, afterHash));
         }
 
-        private static ToolOutcome Uncertain(string message) => new ToolOutcome
+        // Confirm the patched bytes on disk, then record them. A ledger failure after
+        // a confirmed write is Unknown (real change, missing record), not Effect.None.
+        private static ToolOutcome RecordModifiedOrUncertain(ChangeLedger ledger, ToolExecutionContext context,
+            string full, string rel, string readHash, string baselineHash, string afterHash)
         {
-            Status = ToolCallStatus.Failed, Output = message, Effect = EffectState.Unknown
-        };
+            string disk = CreateFileTool.ReadHashOrEmpty(full);
+            if (disk != afterHash)
+                return Uncertain("Write result could not be confirmed on disk for " + rel + "; verify before retrying.");
+            try
+            {
+                ledger.RecordModified(context.TaskId, rel, baselineHash, afterHash, context);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                return WrittenButUnrecorded(rel, afterHash, ex.Message);
+            }
+            return Ok(ToJson(new { path = rel, beforeHash = readHash, afterHash, status = "modified" }));
+        }
 
         private static int CountOccurrences(string text, string value)
         {
@@ -181,17 +237,70 @@ namespace MiniHarness.Coding
             this.ledger = ledger;
         }
 
+        private const int MaxDiffCharsPerFile = 8_000;
+
         public override ToolDefinition Definition { get; } = Def("get_changes",
-            "List the changes made by this agent task, with before/after hashes. Excludes pre-existing user edits; no version control operation is performed.",
+            "List the changes made by this agent task with before/after hashes and a readable unified diff. Excludes pre-existing user edits; no version control operation is performed.",
             "{\"type\":\"object\",\"properties\":{}," +
             "\"additionalProperties\":false}");
 
         protected override Task<ToolOutcome> RunAsync(JsonElement args, ToolExecutionContext context, CancellationToken ct)
         {
-            var changes = ledger.List(context.TaskId)
-                .Select(c => new { path = c.Path, status = c.Status, beforeHash = c.BeforeHash, afterHash = c.AfterHash, operationId = c.OperationId })
-                .ToList();
+            var access = new WorkspaceAccess(context.Workspace, Options);
+            var changes = new List<object>();
+            foreach (var c in ledger.List(context.TaskId))
+            {
+                string before = BaselineText(context.TaskId, c);
+                string after = CurrentTextOrEmpty(access, c.Path, out bool present, out string currentHash);
+                bool drifted = present && currentHash != c.AfterHash;
+                string diff = present
+                    ? DiffFormatter.Unified(c.Path, before, after, MaxDiffCharsPerFile)
+                    : "--- a/" + c.Path + "\n+++ /dev/null\n(current file is absent; it existed at the recorded change)\n";
+
+                changes.Add(new
+                {
+                    path = c.Path,
+                    status = c.Status,
+                    beforeHash = c.BeforeHash,
+                    afterHash = c.AfterHash,
+                    operationId = c.OperationId,
+                    currentHash,
+                    currentFilePresent = present,
+                    // True when the on-disk file changed again after the agent's recorded edit.
+                    currentDiffersFromRecord = drifted,
+                    diff
+                });
+            }
             return Task.FromResult(Ok(ToJson(new { taskId = context.TaskId, changes })));
+        }
+
+        // First-touch baseline bytes live outside the workspace; decode as UTF-8.
+        // Added files have an empty baseline.
+        private string BaselineText(string taskId, ChangeRecord c)
+        {
+            if (c.BeforeHash.Length == 0) return "";
+            byte[]? bytes = ledger.BaselineBytes(taskId, c.BeforeHash);
+            if (bytes == null || bytes.Length == 0) return "";
+            try
+            {
+                int offset = bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF ? 3 : 0;
+                return new UTF8Encoding(false, true).GetString(bytes, offset, bytes.Length - offset);
+            }
+            catch (DecoderFallbackException) { return "<baseline is not valid UTF-8 text>"; }
+        }
+
+        private static string CurrentTextOrEmpty(WorkspaceAccess access, string relative, out bool present, out string currentHash)
+        {
+            present = false; currentHash = "";
+            try
+            {
+                string full = access.Resolve(relative);
+                if (!File.Exists(full)) return "";
+                var text = access.ReadText(full);
+                present = true; currentHash = text.Hash;
+                return text.Text;
+            }
+            catch (WorkspaceAccessException) { return ""; }
         }
     }
 }

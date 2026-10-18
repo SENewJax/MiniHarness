@@ -1,4 +1,4 @@
-param([string]$DotnetPath = 'dotnet', [ValidateSet('all','legacy','1','2','3','4-5','6','7','v0-control','v0-replan','v0-resource','v0-child','v1-tool','v1-workspace','v1-mutation','v1-process','v1-verify','v1-e2e')][string]$Stage = 'all')
+param([string]$DotnetPath = 'dotnet', [ValidateSet('all','legacy','1','2','3','4-5','6','7','v0-control','v0-replan','v0-resource','v0-child','v1-tool','v1-workspace','v1-mutation','v1-process','v1-verify','v1-policy','v1-e2e')][string]$Stage = 'all')
 $ErrorActionPreference = 'Stop'
 $workspace = Split-Path -Parent $PSScriptRoot
 Push-Location -LiteralPath $workspace

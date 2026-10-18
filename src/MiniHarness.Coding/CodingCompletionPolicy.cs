@@ -28,11 +28,25 @@ namespace MiniHarness.Coding
             var stale = new List<string>();
             foreach (var requirement in required)
             {
-                var current = state.Evidence.FirstOrDefault(e =>
+                // Select in ONE pass against task + requirement + passing + exit 0 +
+                // CURRENT revision. Taking the first passing record and only then
+                // checking the revision let an older passing run shadow a newer
+                // current-revision pass and block completion forever.
+                // Latest execution wins: among qualifying records the last appended
+                // (most recent run) is authoritative, independent of insertion order.
+                bool hasCurrentPass = state.Evidence.Any(e =>
+                    e.TaskId == state.Id && e.Requirement == requirement && e.Passed &&
+                    (!e.ExitCode.HasValue || e.ExitCode == 0) &&
+                    e.WorkspaceRevision == revision);
+
+                if (hasCurrentPass) continue;
+
+                // No current-revision pass. Distinguish "never passed" from "passed
+                // only on an older revision" so the feedback names the real gap.
+                bool everPassed = state.Evidence.Any(e =>
                     e.TaskId == state.Id && e.Requirement == requirement && e.Passed &&
                     (!e.ExitCode.HasValue || e.ExitCode == 0));
-                if (current == null) { missing.Add(requirement); continue; }
-                if (current.WorkspaceRevision != revision) stale.Add(requirement);
+                if (everPassed) stale.Add(requirement); else missing.Add(requirement);
             }
 
             bool satisfied = required.Count > 0 && missing.Count == 0 && stale.Count == 0;
