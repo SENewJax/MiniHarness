@@ -1,6 +1,4 @@
 using System;
-using System.IO;
-using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
@@ -14,33 +12,33 @@ namespace MiniHarness.Server
 {
     public sealed class TaskApi
     {
-        private readonly ITaskRuntime runtime;
+        private readonly ITaskApplicationService runtime;
         private readonly ModelOptions model;
         private readonly ServerOptions server;
-        private readonly CodingTaskSetup codingSetup;
+
         private readonly ILogger<TaskApi> logger;
-        public TaskApi(ITaskRuntime runtime, ModelOptions model, ServerOptions server, CodingTaskSetup codingSetup, ILogger<TaskApi> logger)
-        { this.runtime = runtime; this.model = model; this.server = server; this.codingSetup = codingSetup; this.logger = logger; }
+        public TaskApi(ITaskApplicationService runtime, ModelOptions model, ServerOptions server, ILogger<TaskApi> logger)
+        { this.runtime = runtime; this.model = model; this.server = server; this.logger = logger; }
         public void Map(WebApplication app)
         {
             app.MapPost("/agent/tasks/commands", (HttpContext http) => GuardAsync(http, async () =>
             {
-                var command = await JsonSerializer.DeserializeAsync<TaskCommand>(http.Request.Body, TaskJson.Options, http.RequestAborted)
+                using var execution = new RequestExecution(server, http.RequestAborted);
+                var command = await JsonSerializer.DeserializeAsync<TaskCommand>(http.Request.Body, TaskJson.Options, execution.Token)
                     ?? throw new ArgumentException("A task command is required.");
                 if (command.Request != null)
                 {
                     if (command.Request.Model != server.ModelAlias) throw new ArgumentException("Unknown agent model alias.");
                     command.Request.Model = model.Model;
                 }
-                if (command.Kind == TaskCommandKind.Start) ConfigureWorkspace(command);
                 if (http.Request.Query["wait"] == "false")
                 {
-                    var submission = await runtime.SubmitAsync(command, http.RequestAborted);
+                    var submission = await runtime.SubmitAsync(command, execution.Options, execution.Token);
                     http.Response.StatusCode = 202;
                     http.Response.Headers.Location = "/agent/tasks/" + submission.TaskId;
-                    await http.Response.WriteAsJsonAsync(submission, TaskJson.Options, http.RequestAborted);
+                    await http.Response.WriteAsJsonAsync(submission, TaskJson.Options, execution.Token);
                 }
-                else await http.Response.WriteAsJsonAsync(await runtime.ExecuteAsync(command, http.RequestAborted), TaskJson.Options, http.RequestAborted);
+                else await http.Response.WriteAsJsonAsync(await runtime.ExecuteAsync(command, execution.Options, execution.Token), TaskJson.Options, execution.Token);
             }));
             app.MapGet("/agent/tasks/{id}", (HttpContext http, string id) => GuardAsync(http, async () =>
             {
@@ -74,35 +72,12 @@ namespace MiniHarness.Server
                 }
             }));
         }
-        private void ConfigureWorkspace(TaskCommand command)
-        {
-            command.Facts ??= new TaskFacts { Goal = command.Request?.Messages.FirstOrDefault(m => m.Role == "user")?.Text ?? "" };
-            string requested = command.Facts.Workspace.RootPath;
-            if (server.WorkspaceRoot.Length == 0)
-            {
-                if (requested.Length > 0) throw new ArgumentException("Configure Server:WorkspaceRoot before using a workspace.");
-            }
-            else
-            {
-                string allowed = Path.TrimEndingDirectorySeparator(Path.GetFullPath(server.WorkspaceRoot));
-                string resolved = requested.Length == 0 ? allowed : Path.TrimEndingDirectorySeparator(Path.GetFullPath(requested));
-                if (!resolved.Equals(allowed, StringComparison.OrdinalIgnoreCase) && !resolved.StartsWith(allowed + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
-                    throw new ArgumentException("Workspace is outside the server scope.");
-                for (string? path = resolved; path != null; path = Directory.GetParent(path)?.FullName)
-                {
-                    if (Directory.Exists(path) && (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
-                        throw new ArgumentException("Linked workspace paths are not permitted.");
-                    if (path.Equals(allowed, StringComparison.OrdinalIgnoreCase)) break;
-                }
-                command.Facts.Workspace.RootPath = resolved;
-            }
-            command.Facts.Workspace.Grants = server.WorkspaceGrants.ToList();
-            codingSetup.Apply(command.Facts);
-        }
         private async Task GuardAsync(HttpContext http, Func<Task> action)
         {
             try { await action(); }
             catch (OperationCanceledException) when (http.RequestAborted.IsCancellationRequested) { }
+            catch (OperationCanceledException)
+            { if (!http.Response.HasStarted) await AgentApi.ErrorAsync(http, 408, "agent_timeout", "Agent request timed out."); }
             catch (TaskConflictException ex) { if (!http.Response.HasStarted) await AgentApi.ErrorAsync(http, 409, "task_conflict", ex.Message); }
             catch (Exception ex) when (ex is JsonException || ex is ArgumentException)
             { if (!http.Response.HasStarted) await AgentApi.ErrorAsync(http, 400, "invalid_request_error", ex is ArgumentException ? ex.Message : "Malformed task command."); }

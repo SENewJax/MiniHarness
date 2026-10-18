@@ -72,9 +72,9 @@ namespace MiniHarness.Coding
             "), but the change record could not be persisted, so the effect is unrecorded. " +
             "Reconcile the file state; do not re-apply the edit blindly. Underlying error: " + detail);
 
-        protected static ToolOutcome Ok(string output) => new ToolOutcome
+        protected static ToolOutcome Ok(string output, EffectState effect = EffectState.None) => new ToolOutcome
         {
-            Status = ToolCallStatus.Succeeded, Output = output, Effect = EffectState.None
+            Status = ToolCallStatus.Succeeded, Output = output, Effect = effect
         };
 
         protected static ToolDefinition Def(string name, string description, string schema)

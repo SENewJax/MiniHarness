@@ -25,6 +25,19 @@ namespace MiniHarness.Abstractions
         Task<AgentTaskState?> GetAsync(string taskId, CancellationToken cancellationToken);
         Task<IReadOnlyList<TaskEvent>> ObserveAsync(string taskId, long afterSequence, CancellationToken cancellationToken);
     }
+    public interface ITaskInitializer
+    {
+        void Initialize(TaskCommand command);
+    }
+    public sealed class TaskExecutionOptions
+    {
+        public bool CancelTaskWhenWaitCancelled { get; set; }
+    }
+    public interface ITaskApplicationService : ITaskRuntime
+    {
+        Task<TaskCommandResult> ExecuteAsync(TaskCommand command, TaskExecutionOptions options, CancellationToken waitCancellation);
+        Task<TaskSubmission> SubmitAsync(TaskCommand command, TaskExecutionOptions options, CancellationToken waitCancellation);
+    }
     public interface IAgentService
     {
         Task<RunState> RespondAsync(AgentInput input, CancellationToken waitCancellation);

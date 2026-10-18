@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup><OutputType>Exe</OutputType></PropertyGroup>
   <ItemGroup>
+    <Compile Include="../Shared/ValidationPaths.cs" Link="ValidationPaths.cs" />
     <ProjectReference Include="../../src/MiniHarness.Server/MiniHarness.Server.csproj" />
     <ProjectReference Include="../../src/MiniHarness.Coding/MiniHarness.Coding.csproj" />
     <FrameworkReference Include="Microsoft.AspNetCore.App" />

@@ -28,6 +28,12 @@ namespace MiniHarness.Coding
     {
         public LedgerCorruptException(string message) : base(message) { }
     }
+    public sealed class LedgerPersistenceException : IOException
+    {
+        public string? DiagnosticPath { get; }
+        public LedgerPersistenceException(string message, Exception inner, string? diagnosticPath) : base(message, inner)
+        { DiagnosticPath = diagnosticPath; HResult = inner.HResult; }
+    }
 
     internal sealed class LedgerFile
     {
@@ -60,7 +66,7 @@ namespace MiniHarness.Coding
         }
 
         // Test-only fault injection: when non-null, a durable ledger save throws this
-        // after the atomic file move, simulating a post-write bookkeeping failure.
+        // before ledger publication, after the workspace mutation has succeeded.
         // Production code leaves it null; this models a real IOException from disk.
         public Exception? PersistFault { get; set; }
 
@@ -98,13 +104,72 @@ namespace MiniHarness.Coding
             // Injected bookkeeping failure happens BEFORE the atomic move, so the
             // ledger genuinely stays without the new record — a real disk fault
             // during bookkeeping, after the workspace write already succeeded.
-            if (PersistFault != null) throw PersistFault;
-            Directory.CreateDirectory(TaskDir(taskId));
             string path = LedgerPath(taskId);
-            string tmp = path + ".tmp";
-            File.WriteAllText(tmp, JsonSerializer.Serialize(ledger, Json), new UTF8Encoding(false));
-            File.Move(tmp, path, overwrite: true);
+            string tmp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            string operation = "injected_fault";
+            int publicationAttempts = 0;
+            Exception? firstPublicationFailure = null;
+            try
+            {
+                if (PersistFault != null) throw PersistFault;
+                operation = "create_directory";
+                Directory.CreateDirectory(TaskDir(taskId));
+                operation = "write_temporary";
+                using (var stream = new FileStream(tmp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                    byte[] bytes = new UTF8Encoding(false).GetBytes(JsonSerializer.Serialize(ledger, Json));
+                    stream.Write(bytes); stream.Flush(true);
+                }
+                operation = "publish_move_overwrite";
+                // Retry publication of the SAME immutable ledger bytes, never
+                // the source edit. Persistent denial still surfaces as Unknown.
+                for (int attempt = 0; ; attempt++)
+                {
+                    publicationAttempts++;
+                    try { File.Move(tmp, path, overwrite: true); break; }
+                    catch (Exception ex) when (attempt < 6 && OperatingSystem.IsWindows() &&
+                        (ex is IOException or UnauthorizedAccessException) && NativeError(ex) is 5 or 32 or 33 && File.Exists(tmp))
+                    {
+                        firstPublicationFailure ??= ex;
+                        Thread.Sleep(10 << attempt);
+                    }
+                }
+                if (firstPublicationFailure != null)
+                    RecordFailure(taskId, operation, path, tmp, firstPublicationFailure, publicationAttempts, recovered: true);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                string? diagnostic = RecordFailure(taskId, operation, path, tmp, ex, publicationAttempts);
+                throw new LedgerPersistenceException("Ledger " + operation + " failed: " + ex.GetType().Name + " " +
+                    "(HRESULT=0x" + ex.HResult.ToString("X8") + ", native=" + NativeError(ex) + "): " + ex.Message +
+                    "; target=" + path + "; diagnostic=" + (diagnostic ?? "unavailable; original=" + ex), ex, diagnostic);
+            }
         }
+        private string? RecordFailure(string taskId, string operation, string path, string temporary, Exception error, int attempts, bool recovered = false)
+        {
+            try
+            {
+                string directory = Path.Combine(stateRoot, "diagnostics");
+                Directory.CreateDirectory(directory);
+                string report = Path.Combine(directory, Guid.NewGuid().ToString("N") + ".json");
+                File.WriteAllText(report, JsonSerializer.Serialize(new
+                {
+                    capturedAtUtc = DateTimeOffset.UtcNow, taskId, operation, path, temporary, attempts, recovered,
+                    exceptionType = error.GetType().FullName, hResult = "0x" + error.HResult.ToString("X8"),
+                    nativeError = NativeError(error), exception = error.ToString(),
+                    targetExists = File.Exists(path), temporaryExists = File.Exists(temporary),
+                    targetAttributes = Attributes(path), temporaryAttributes = Attributes(temporary)
+                }, Json), new UTF8Encoding(false));
+                return report;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return null; }
+        }
+        private static string? Attributes(string path)
+        {
+            try { return File.Exists(path) ? File.GetAttributes(path).ToString() : null; }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return "unavailable:" + ex.GetType().Name; }
+        }
+        private static int? NativeError(Exception error) => ((uint)error.HResult & 0xffff0000u) == 0x80070000u ? error.HResult & 0xffff : null;
 
         // Returns the baseline hash to associate with the pre-edit content of a
         // path. On first touch the current bytes are snapshotted outside the

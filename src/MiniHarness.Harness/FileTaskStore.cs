@@ -12,6 +12,16 @@ namespace MiniHarness.Harness
     public sealed class FileTaskStore : ITaskStore
     {
         private readonly string directory;
+        // A writer lease excludes other writers, not status/event readers.
+        // Windows replacement can fail while a reader still owns a handle.
+        // Bounded stripes coordinate handle lifetime and publication across
+        // store instances without retaining one lock per historical task.
+        private static readonly SemaphoreSlim[] fileGates = Enumerable.Range(0, 128).Select(_ => new SemaphoreSlim(1, 1)).ToArray();
+        private static SemaphoreSlim FileGate(string path)
+        {
+            var comparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+            return fileGates[(int)((uint)comparer.GetHashCode(path) % (uint)fileGates.Length)];
+        }
         public FileTaskStore(string directory)
         {
             this.directory = Path.GetFullPath(directory);
@@ -27,9 +37,9 @@ namespace MiniHarness.Harness
         {
             string taskId = NormalizeId(id);
             string path = Path.Combine(directory, taskId + ".json");
-            if (File.Exists(path))
+            using var json = await ReadIfExistsAsync(path, cancellationToken).ConfigureAwait(false);
+            if (json != null)
             {
-                using var json = await ReadAsync(path, cancellationToken).ConfigureAwait(false);
                 if (!json.RootElement.TryGetProperty("schemaVersion", out var version) || version.GetInt32() != AgentTaskState.CurrentSchemaVersion)
                     throw new InvalidDataException("Unsupported task checkpoint schema version.");
                 var task = json.RootElement.Deserialize<AgentTaskState>(TaskJson.Options)!;
@@ -37,8 +47,8 @@ namespace MiniHarness.Harness
                 return task;
             }
             string legacyPath = Path.Combine(directory, "resp_" + taskId.Substring(5) + ".json");
-            if (!File.Exists(legacyPath)) return null;
-            using var legacy = await ReadAsync(legacyPath, cancellationToken).ConfigureAwait(false);
+            using var legacy = await ReadIfExistsAsync(legacyPath, cancellationToken).ConfigureAwait(false);
+            if (legacy == null) return null;
             return LegacyTaskMigration.Convert(legacy.RootElement.Deserialize<RunState>(TaskJson.Options)!);
         }
         public Task<ITaskLease> AcquireAsync(string id, CancellationToken cancellationToken)
@@ -57,9 +67,9 @@ namespace MiniHarness.Harness
             if (!responseId.StartsWith("resp_", StringComparison.Ordinal)) throw new ArgumentException("Invalid response ID.");
             NormalizeId(responseId);
             string path = Path.Combine(directory, "response-" + responseId + ".json");
-            if (File.Exists(path))
+            using var index = await ReadIfExistsAsync(path, cancellationToken).ConfigureAwait(false);
+            if (index != null)
             {
-                using var index = await ReadAsync(path, cancellationToken).ConfigureAwait(false);
                 return index.RootElement.Deserialize<TaskResponseReference>(TaskJson.Options);
             }
             // The index is rebuildable: a crash after the task commit cannot hide a response.
@@ -72,10 +82,17 @@ namespace MiniHarness.Harness
             var legacy = await LoadAsync(responseId, cancellationToken).ConfigureAwait(false);
             return legacy == null ? null : new TaskResponseReference { TaskId = legacy.Id, TurnId = legacy.Turns[0].Id };
         }
-        private static async Task<JsonDocument> ReadAsync(string path, CancellationToken cancellationToken)
+        private static async Task<JsonDocument?> ReadIfExistsAsync(string path, CancellationToken cancellationToken)
         {
-            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            return await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken).ConfigureAwait(false);
+            var gate = FileGate(path);
+            await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                if (!File.Exists(path)) return null;
+                using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                return await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken).ConfigureAwait(false);
+            }
+            finally { gate.Release(); }
         }
         private static async Task WriteAsync<T>(string path, T value, CancellationToken cancellationToken)
         {
@@ -88,7 +105,10 @@ namespace MiniHarness.Harness
                     await JsonSerializer.SerializeAsync(stream, value, TaskJson.Options, cancellationToken).ConfigureAwait(false);
                     stream.Flush(true);
                 }
-                File.Move(temporary, path, true);
+                var gate = FileGate(path);
+                await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                try { File.Move(temporary, path, true); }
+                finally { gate.Release(); }
             }
             finally { if (File.Exists(temporary)) File.Delete(temporary); }
         }

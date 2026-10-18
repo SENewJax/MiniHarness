@@ -21,6 +21,8 @@ namespace MiniHarness.LiveTests
         public static async Task<int> Main(string[] args)
         {
             if (args.FirstOrDefault() == "--runtime") return await ValidateRuntimeAsync(args.Skip(1).ToArray());
+            if (args.FirstOrDefault() == "--coding") return await ValidateCodingAsync(args.Skip(1).ToArray());
+            if (args.FirstOrDefault() == "--coding-fixture") return await ValidateCodingAsync(new[] { "Offline" });
             string key = "";
             try
             {
@@ -80,7 +82,7 @@ namespace MiniHarness.LiveTests
                 };
                 var jsonOptions = new JsonSerializerOptions { WriteIndented = true, Converters = { new JsonStringEnumConverter() } };
                 string output = Sanitize(JsonSerializer.Serialize(report, jsonOptions), key);
-                string reportPath = args.Length > 0 ? Path.GetFullPath(args[0]) : Path.Combine(Directory.GetCurrentDirectory(), ".data", "validation", "llm-validation.json");
+                string reportPath = args.Length > 0 ? Path.GetFullPath(args[0]) : Path.Combine(MiniHarness.Testing.ValidationPaths.Root, "llm-validation.json");
                 Directory.CreateDirectory(Path.GetDirectoryName(reportPath)!);
                 await File.WriteAllTextAsync(reportPath, output);
                 Console.WriteLine("Report: " + reportPath);

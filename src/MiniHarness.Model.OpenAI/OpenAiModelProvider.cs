@@ -31,7 +31,7 @@ namespace MiniHarness.Model.OpenAI
     }
 
     // Transport/retry logic is shared; adapters differ only by the wire protocol.
-    public abstract class OpenAiModelProvider : IModelProvider
+    public abstract class OpenAiModelProvider : IModelProvider, IModelRequestSizer
     {
         private readonly HttpClient client;
         private readonly ModelOptions options;
@@ -89,6 +89,7 @@ namespace MiniHarness.Model.OpenAI
                 catch (JsonException ex) { throw new ModelException("Invalid upstream JSON.", ex); }
             }
         }
+        public int MeasureCharacters(ModelRequest request) => protocol.WriteRequest(request).ToJsonString().Length;
 
         private static TimeSpan RetryDelay(HttpResponseMessage response, int attempt)
         {

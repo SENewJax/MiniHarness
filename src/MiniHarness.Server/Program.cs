@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using MiniHarness.Abstractions;
 using MiniHarness.Coding;
 using MiniHarness.Harness;
@@ -22,7 +23,7 @@ namespace MiniHarness.Server
             Build(args).Run();
         }
 
-        public static WebApplication Build(string[] args)
+        public static WebApplication Build(string[] args, Action<WebApplicationBuilder>? configure = null)
         {
             // One composition root and one configuration file for all implementations.
             var builder = WebApplication.CreateBuilder(new WebApplicationOptions
@@ -30,6 +31,7 @@ namespace MiniHarness.Server
                 Args = args,
                 ContentRootPath = AppContext.BaseDirectory
             });
+            configure?.Invoke(builder);
             var server = builder.Configuration.GetSection("Server").Get<ServerOptions>() ?? new ServerOptions();
             var model = builder.Configuration.GetSection("Model").Get<ModelOptions>() ?? new ModelOptions();
             CodingPlanConfiguration.ApplyWhenUnconfigured(model);
@@ -68,7 +70,8 @@ namespace MiniHarness.Server
             builder.Services.AddSingleton<IToolRegistry>(new ToolRegistry(registeredTools));
             builder.Services.AddSingleton<IToolPolicy>(new AllowListToolPolicy(allowedNames));
             builder.Services.AddSingleton<IToolExecutor, ToolExecutor>();
-            builder.Services.AddSingleton<IContextBuilder, ContextBuilder>();
+            builder.Services.AddSingleton<IContextBuilder>(services => new ContextBuilder(harness,
+                services.GetRequiredService<IModelProvider>() as IModelRequestSizer));
             builder.Services.AddSingleton<ICompletionPolicy, NaturalStopPolicy>();
             // The workspace gate and verification tool must hash the workspace with
             // exactly the same rules, so they share one revision provider instance.
@@ -85,11 +88,16 @@ namespace MiniHarness.Server
                 return new ChatCompletionsModelProvider(client, model);
             });
             builder.Services.AddSingleton<TaskRuntime>(services => new TaskRuntime(services.GetRequiredService<IModelProvider>(),
-                services.GetRequiredService<ITaskStore>(), harness, binding, tools: services.GetRequiredService<IToolRegistry>(),
+                services.GetRequiredService<ITaskStore>(), harness, binding, context: services.GetRequiredService<IContextBuilder>(), tools: services.GetRequiredService<IToolRegistry>(),
                 toolPolicy: services.GetRequiredService<IToolPolicy>(), executor: services.GetRequiredService<IToolExecutor>(),
                 completion: taskCompletion, workspaceRevision: revisionProvider,
-                resourceManagers: services.GetServices<IResourceManager>()));
-            builder.Services.AddSingleton<ITaskRuntime>(services => services.GetRequiredService<TaskRuntime>());
+                resourceManagers: services.GetServices<IResourceManager>(), executionFailed: (id, error) =>
+                    services.GetRequiredService<ILogger<TaskRuntime>>().LogError(error, "Task {TaskId} execution failed after acceptance.", id)));
+            builder.Services.AddSingleton<ITaskInitializer, HostTaskInitializer>();
+            builder.Services.AddSingleton<TaskApplicationService>(services => new TaskApplicationService(
+                services.GetRequiredService<TaskRuntime>(), services.GetRequiredService<ITaskInitializer>()));
+            builder.Services.AddSingleton<ITaskApplicationService>(services => services.GetRequiredService<TaskApplicationService>());
+            builder.Services.AddSingleton<ITaskRuntime>(services => services.GetRequiredService<ITaskApplicationService>());
             builder.Services.AddSingleton<ProtocolAgentService>();
             builder.Services.AddSingleton<IAgentService>(services => services.GetRequiredService<ProtocolAgentService>());
             builder.Services.AddSingleton<IAgentRunner>(services => services.GetRequiredService<ProtocolAgentService>());

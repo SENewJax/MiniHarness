@@ -11,11 +11,11 @@ namespace MiniHarness.Harness
     // ITaskRuntime.Input explicitly, so branching cannot silently append to a goal.
     public sealed class ProtocolAgentService : IAgentService, IAgentRunner
     {
-        private readonly ITaskRuntime runtime;
+        private readonly ITaskApplicationService runtime;
         private readonly ITaskStore store;
         private readonly ModelBinding binding;
         public ProtocolAgentService(ITaskRuntime runtime, ITaskStore store, ModelBinding binding)
-        { this.runtime = runtime; this.store = store; this.binding = TaskJson.Clone(binding); }
+        { this.runtime = runtime as ITaskApplicationService ?? new TaskApplicationService(runtime); this.store = store; this.binding = TaskJson.Clone(binding); }
         public Task<RunState> RunAsync(ModelRequest request, CancellationToken cancellationToken)
             => RespondAsync(new AgentInput { Request = request }, cancellationToken);
         public async Task<RunState> RespondAsync(AgentInput input, CancellationToken waitCancellation)
@@ -37,13 +37,8 @@ namespace MiniHarness.Harness
             ConversationRules.Validate(request.Messages);
             var command = new TaskCommand { Id = input.CommandId, Kind = TaskCommandKind.Start, Request = request, ForkedFromResponseId = input.PreviousResponseId };
             waitCancellation.ThrowIfCancellationRequested();
-            string taskId = "task_" + TaskJson.Hash(command.Id).Substring(0, 32);
-            using var registration = waitCancellation.Register(() =>
-            {
-                if (input.CancelTaskWhenWaitCancelled)
-                    _ = runtime.ExecuteAsync(new TaskCommand { Kind = TaskCommandKind.Cancel, TaskId = taskId }, CancellationToken.None);
-            });
-            var result = await runtime.ExecuteAsync(command, waitCancellation).ConfigureAwait(false);
+            var result = await runtime.ExecuteAsync(command, new TaskExecutionOptions
+                { CancelTaskWhenWaitCancelled = input.CancelTaskWhenWaitCancelled }, waitCancellation).ConfigureAwait(false);
             return TaskProjection.ToRun(result.State, result.State.Turns.Single(t => t.Id == result.Receipt.TurnId));
         }
         public async Task<RunState?> ReadResponseAsync(string responseId, CancellationToken cancellationToken)

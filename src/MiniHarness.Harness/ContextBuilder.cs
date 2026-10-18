@@ -14,7 +14,8 @@ namespace MiniHarness.Harness
     public sealed class ContextBuilder : IContextBuilder
     {
         private readonly HarnessOptions options;
-        public ContextBuilder(HarnessOptions options) { this.options = options; }
+        private readonly IModelRequestSizer? sizer;
+        public ContextBuilder(HarnessOptions options, IModelRequestSizer? sizer = null) { this.options = options; this.sizer = sizer; }
 
         public ModelRequest Build(RunState state, IReadOnlyList<ToolDefinition> localTools)
         {
@@ -36,7 +37,18 @@ namespace MiniHarness.Harness
                 request.Messages.Insert(string.IsNullOrWhiteSpace(options.SystemInstructions) ? 0 : 1,
                     new Message { Role = "system", Text = state.Request.Instructions });
             // Deterministic capacity guard, not a tokenizer or semantic compactor.
-            if (JsonSerializer.Serialize(request).Length > options.MaxContextCharacters)
+            int characters = sizer?.MeasureCharacters(request) ?? JsonSerializer.Serialize(new
+            {
+                request.Model, request.Instructions, request.Tools, request.Options,
+                Messages = request.Messages.Select(m => new
+                {
+                    m.Role, Text = m.ProviderItemsAreComplete ? null : m.Text,
+                    ToolCallId = m.ProviderItemsAreComplete ? null : m.ToolCallId,
+                    ToolCalls = m.ProviderItemsAreComplete ? null : m.ToolCalls,
+                    m.ProviderItems
+                })
+            }).Length;
+            if (characters > options.MaxContextCharacters)
                 throw new ContextLimitException();
             return request;
         }

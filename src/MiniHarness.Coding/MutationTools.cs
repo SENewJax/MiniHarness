@@ -84,7 +84,7 @@ namespace MiniHarness.Coding
             {
                 return WrittenButUnrecorded(rel, hash, ex.Message);
             }
-            return Ok(ToJson(new { path = rel, hash, status = "added", bytes = length }));
+            return Ok(ToJson(new { path = rel, hash, status = "added", bytes = length }), EffectState.Confirmed);
         }
 
         // Hash of an existing file, or "" when it is absent/unreadable. Used to tell
@@ -199,7 +199,7 @@ namespace MiniHarness.Coding
             {
                 return WrittenButUnrecorded(rel, afterHash, ex.Message);
             }
-            return Ok(ToJson(new { path = rel, beforeHash = readHash, afterHash, status = "modified" }));
+            return Ok(ToJson(new { path = rel, beforeHash = readHash, afterHash, status = "modified" }), EffectState.Confirmed);
         }
 
         private static int CountOccurrences(string text, string value)

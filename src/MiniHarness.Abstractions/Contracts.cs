@@ -9,6 +9,10 @@ namespace MiniHarness.Abstractions
     {
         Task<ModelResponse> GenerateAsync(ModelRequest request, CancellationToken cancellationToken);
     }
+    public interface IModelRequestSizer
+    {
+        int MeasureCharacters(ModelRequest request);
+    }
 
     public interface IAgentRunner
     {

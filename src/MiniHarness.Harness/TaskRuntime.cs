@@ -24,6 +24,7 @@ namespace MiniHarness.Harness
         private readonly ITaskCompletionPolicy completion;
         private readonly IWorkspaceRevisionProvider workspaceRevision;
         private readonly Dictionary<string, IResourceManager> resourceManagers;
+        private readonly Action<string, Exception>? executionFailed;
         private readonly ConcurrentDictionary<string, Slot> slots = new ConcurrentDictionary<string, Slot>();
         private readonly ConcurrentDictionary<long, Task> active = new ConcurrentDictionary<long, Task>();
         private long invocation;
@@ -33,11 +34,11 @@ namespace MiniHarness.Harness
             IContextBuilder? context = null, IToolRegistry? tools = null, IToolPolicy? toolPolicy = null,
             IContextualToolPolicy? policy = null, IToolExecutor? executor = null,
             IContextPreparation? preparation = null, ITaskCompletionPolicy? completion = null, IWorkspaceRevisionProvider? workspaceRevision = null,
-            IEnumerable<IResourceManager>? resourceManagers = null)
+            IEnumerable<IResourceManager>? resourceManagers = null, Action<string, Exception>? executionFailed = null)
         {
             options.Validate(); this.model = model; this.store = store;
             this.options = TaskJson.Clone(options); this.binding = TaskJson.Clone(binding);
-            this.context = context ?? new ContextBuilder(this.options);
+            this.context = context ?? new ContextBuilder(this.options, model as IModelRequestSizer);
             this.tools = tools ?? new ToolRegistry(Array.Empty<ITool>());
             this.policy = policy ?? new LegacyToolPolicyAdapter(toolPolicy ?? new AllowListToolPolicy(Array.Empty<string>()));
             this.executor = new ContextualToolExecutor(executor ?? new ToolExecutor(this.options));
@@ -45,6 +46,7 @@ namespace MiniHarness.Harness
             this.completion = completion ?? new EvidenceCompletionPolicy();
             this.workspaceRevision = workspaceRevision ?? new DirectoryWorkspaceRevision();
             this.resourceManagers = (resourceManagers ?? Array.Empty<IResourceManager>()).ToDictionary(m => m.Kind, StringComparer.Ordinal);
+            this.executionFailed = executionFailed;
         }
         public Task<TaskCommandResult> ExecuteAsync(TaskCommand command, CancellationToken waitCancellation)
             => Schedule(command).Execution.WaitAsync(waitCancellation);
@@ -119,6 +121,14 @@ namespace MiniHarness.Harness
                 finally { slot.Admission.Release(); }
                 transferred = true;
                 return await ExecuteCoreAsync(copy, id, slot, accepted, gateTicket).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    // SubmitAsync may already have returned its durable receipt.
+                    // A background failure must remain observable to the host.
+                    if (accepted.Task.IsCompletedSuccessfully && executionFailed != null)
+                        try { executionFailed(id, ex); } catch { /* Diagnostics must not replace the execution failure. */ }
+                    throw;
                 }
                 finally
                 {
@@ -394,8 +404,9 @@ namespace MiniHarness.Harness
             var view = TaskProjection.ToRun(task, turn);
             view.Request.Messages = TaskJson.Clone(prepared.Messages);
             view.Request.Instructions = "Task facts:\n" + JsonSerializer.Serialize(task.Facts, TaskJson.Options) + "\n" + view.Request.Instructions;
+            view.Request.Options.MaxOutputTokens = (int)Math.Min(view.Request.Options.MaxOutputTokens,
+                task.Budget.MaxTokens - task.Budget.Usage.TotalTokens - task.Budget.ReservedTokens);
             var request = context.Build(view, step.Capabilities.Tools);
-            request.Options.MaxOutputTokens = (int)Math.Min(request.Options.MaxOutputTokens, task.Budget.MaxTokens - task.Budget.Usage.TotalTokens - task.Budget.ReservedTokens);
             step.PreparedRequest = TaskJson.Clone(request); step.Status = StepStatus.Running;
             task.Budget.ModelCalls++; turn.ModelCalls++; Emit(task, "ModelStarted", turn);
             await CommitAsync(lease, task).ConfigureAwait(false);

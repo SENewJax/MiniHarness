@@ -22,6 +22,7 @@ namespace MiniHarness.Tests
             ProtocolTests.Register(tests);
             HttpTests.Register(tests);
             TaskStageTests.Register(tests);
+            ConsistencyTests.Register(tests);
             CodingStageTests.Register(tests);
             VerificationStageTests.Register(tests);
             CodingCompletionPolicyStageTests.Register(tests);
@@ -29,18 +30,19 @@ namespace MiniHarness.Tests
             string stage = args.Length == 2 && args[0] == "--stage" ? args[1] : "all";
             if (args.Length != 0 && (args.Length != 2 || args[0] != "--stage"))
             {
-                Console.WriteLine("Usage: --stage all|legacy|1|2|3|4-5|6|v0-control|v0-replan|v0-resource|v0-child|v1-workspace|v1-mutation|v1-tool|v1-process|v1-verify|v1-policy|v1-e2e"); return 2;
+                Console.WriteLine("Usage: --stage all|legacy|1|2|3|4-5|6|v0-control|v0-replan|v0-resource|v0-child|v0-storage|v1-workspace|v1-mutation|v1-ledger|v1-tool|v1-process|v1-verify|v1-policy|v1-e2e|consistency"); return 2;
             }
             tests = tests.FindAll(t => stage == "all" || (stage == "legacy" ? !t.Name.StartsWith("[", StringComparison.Ordinal)
                 : t.Name.StartsWith("[" + stage + "]", StringComparison.Ordinal)));
             if (tests.Count == 0) { Console.WriteLine("No tests registered for stage " + stage); return 2; }
-            int failures = 0;
+            int failures = 0, skipped = 0;
             foreach (var test in tests)
             {
                 try { await test.Run().ConfigureAwait(false); Console.WriteLine("PASS " + test.Name); }
+                catch (TestSkippedException ex) { skipped++; Console.WriteLine("SKIP " + test.Name + ": " + ex.Message); }
                 catch (Exception ex) { failures++; Console.WriteLine("FAIL " + test.Name + "\n" + ex); }
             }
-            Console.WriteLine($"{tests.Count - failures}/{tests.Count} tests passed.");
+            Console.WriteLine($"{tests.Count - failures - skipped}/{tests.Count} tests passed; {skipped} skipped; {failures} failed.");
             return failures == 0 ? 0 : 1;
         }
 
@@ -177,6 +179,10 @@ namespace MiniHarness.Tests
             Console.WriteLine("Tests run: " + testFiles.Count);
             return failures == 0 ? 0 : 1;
         }
+    }
+    internal sealed class TestSkippedException : Exception
+    {
+        public TestSkippedException(string message) : base(message) { }
     }
 
     internal static class Check

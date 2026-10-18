@@ -15,6 +15,8 @@ namespace MiniHarness.Tests
         public static void Register(List<(string, Func<Task>)> tests)
         {
             tests.Add(("[1] legacy migration, second turn, ownership and schema round trip", StorageScenario));
+            tests.Add(("[v0-storage] concurrent checkpoint readers and publication across store instances", ConcurrentStoreScenario));
+            tests.Add(("[v0-storage] accepted background checkpoint failure reaches host without replay", BackgroundFailureScenario));
             tests.Add(("[2] persistent task, concurrent inputs, dedup, detached wait and cumulative budget", RuntimeScenario));
             tests.Add(("[3] approval continuation, contextual ownership and uncertain effect recovery", OperationsScenario));
             tests.Add(("[4-5] cancelled preparation, frozen step and current-workspace evidence gate", PreparationEvidenceScenario));

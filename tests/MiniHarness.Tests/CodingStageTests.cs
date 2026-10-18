@@ -12,7 +12,7 @@ using MiniHarness.Harness;
 
 namespace MiniHarness.Tests
 {
-    internal static class CodingStageTests
+    internal static partial class CodingStageTests
     {
         public static void Register(List<(string, Func<Task>)> tests)
         {
@@ -26,6 +26,9 @@ namespace MiniHarness.Tests
             tests.Add(("[v1-mutation] a corrupt ledger is refused before the write; a post-write corrupt record is Unknown", CorruptLedgerScenario));
             tests.Add(("[v1-mutation] a very large diff degrades to a bounded summary instead of an LCS matrix", LargeDiffScenario));
             tests.Add(("[v1-tool] per-tool timeout override escapes the default ceiling", ToolTimeoutScenario));
+            tests.Add(("[v1-ledger] repeated confirmed patches preserve durable change records", LedgerPublicationScenario));
+            tests.Add(("[v1-ledger] native publication failure retains original error and unknown effect", LedgerNativeFailureScenario));
+            tests.Add(("[v1-ledger] transient ledger lock retries publication without replaying the patch", LedgerTransientFailureScenario));
         }
 
         private sealed record Workspace(string Root, string State, WorkspaceScope Scope, ChangeLedger Ledger, string Dir);
@@ -163,8 +166,10 @@ namespace MiniHarness.Tests
                 linkCreated = TryCreateFileSymlink(link, outside);
                 if (!linkCreated)
                 {
-                    Console.WriteLine("SKIP: file symlink creation is not permitted for this account (needs admin/developer mode); boundary code path is present but not dynamically exercised here.");
-                    return;
+                    const string reason = "File symlink creation is not permitted; run under an account with symlink privileges or developer mode enabled.";
+                    if (Environment.GetEnvironmentVariable("MINIHARNESS_REQUIRE_SYMLINK_TEST") == "1")
+                        throw new Exception(reason + " Strict acceptance requires this branch to execute.");
+                    throw new TestSkippedException(reason);
                 }
 
                 // Resolve must reject the final-path link before bytes are read.
@@ -224,9 +229,11 @@ namespace MiniHarness.Tests
                 var create = await new CreateFileTool(ws.Ledger).ExecuteAsync(
                     Args(JsonSerializer.Serialize(new { path = "agent.txt", content = "first" })), Context(ws), default);
                 Check.Equal(ToolCallStatus.Succeeded, create.Status);
+                Check.Equal(EffectState.Confirmed, create.Effect);
                 var second = await new CreateFileTool(ws.Ledger).ExecuteAsync(
                     Args(JsonSerializer.Serialize(new { path = "agent.txt", content = "again" })), Context(ws), default);
                 Check.Equal(ToolCallStatus.Failed, second.Status);
+                Check.Equal(EffectState.None, second.Effect);
                 Check.Equal("first", File.ReadAllText(Path.Combine(ws.Root, "agent.txt")));
 
                 var changes = await new GetChangesTool(ws.Ledger).ExecuteAsync(Args("{}"), Context(ws), default);
@@ -280,6 +287,7 @@ namespace MiniHarness.Tests
                 var patched = await new ApplyPatchTool(ws.Ledger).ExecuteAsync(
                     Args(JsonSerializer.Serialize(new { path = "code.cs", expected_hash = hash, old_text = "int X = 1;", new_text = "int X = 2;" })), Context(ws), default);
                 Check.Equal(ToolCallStatus.Succeeded, patched.Status);
+                Check.Equal(EffectState.Confirmed, patched.Effect);
                 string text = File.ReadAllText(file);
                 Check.True(text.Contains("int X = 2;", StringComparison.Ordinal));
                 string bare = text.Replace("\r\n", "");

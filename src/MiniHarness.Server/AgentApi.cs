@@ -62,8 +62,7 @@ namespace MiniHarness.Server
 
         private async Task HandleAsync(HttpContext http, IOpenAiProtocol protocol)
         {
-            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(http.RequestAborted);
-            deadline.CancelAfter(TimeSpan.FromSeconds(server.RequestTimeoutSeconds));
+            using var deadline = new RequestExecution(server, http.RequestAborted);
             try
             {
                 using var json = await JsonDocument.ParseAsync(http.Request.Body, cancellationToken: deadline.Token).ConfigureAwait(false);
@@ -78,7 +77,7 @@ namespace MiniHarness.Server
                 var state = await service.RespondAsync(new AgentInput
                 {
                     Request = api.ModelRequest, PreviousResponseId = api.PreviousResponseId, ToolsSpecified = api.ToolsSpecified,
-                    CancelTaskWhenWaitCancelled = server.CancelOnDisconnect
+                    CancelTaskWhenWaitCancelled = deadline.Options.CancelTaskWhenWaitCancelled
                 }, deadline.Token).ConfigureAwait(false);
                 if (state.TaskId != null) http.Response.Headers["X-Agent-Task-Id"] = state.TaskId;
                 http.Response.Headers["X-Agent-Run-Id"] = state.Id;

@@ -21,7 +21,7 @@ namespace MiniHarness.LiveTests
             try
             {
                 key = Setting("CODING_PLAN_APIKEY");
-                string reportPath = args.Length > 0 ? Path.GetFullPath(args[0]) : Path.Combine(Directory.GetCurrentDirectory(), ".data", "validation", "v0-runtime-validation.json");
+                string reportPath = args.Length > 0 ? Path.GetFullPath(args[0]) : Path.Combine(MiniHarness.Testing.ValidationPaths.Root, "v0-runtime-validation.json");
                 string checkpoints = Path.Combine(Path.GetDirectoryName(reportPath)!, "runtime-checkpoints");
                 Directory.CreateDirectory(Path.GetDirectoryName(reportPath)!);
                 var results = new List<RuntimeProbe>();
