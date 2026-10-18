@@ -106,6 +106,40 @@ namespace MiniHarness.Tests
                     if (childPid.Length > 0) System.IO.File.WriteAllText(childPid + ".parent", Environment.ProcessId.ToString());
                     Thread.Sleep(TimeSpan.FromSeconds(treeSeconds));
                     return 0;
+                case "spawn-hold":
+                    // Start a child that INHERITS our stdout/stderr handles (no
+                    // redirect), then the launcher exits immediately. The inherited
+                    // handles are the runner's redirected pipes, so the surviving
+                    // child keeps EOF from arriving even though the parent is gone.
+                    // Models a build launcher that returns while a watcher lingers.
+                    // The launcher records the child pid itself before exiting, so
+                    // the test can always identify the orphan even if the tree is
+                    // reclaimed before the child gets to write its own file.
+                    string holdPid = args.Length > 2 ? args[2] : "";
+                    int holdSeconds = args.Length > 3 && int.TryParse(args[3], out int hs) ? hs : 30;
+                    var holder = new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = Environment.ProcessPath!,
+                        Arguments = "--self hold-pid \"" + holdPid + "\" " + holdSeconds,
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    };
+                    var holderProc = System.Diagnostics.Process.Start(holder)!;
+                    if (holdPid.Length > 0) System.IO.File.WriteAllText(holdPid, holderProc.Id.ToString());
+                    return 0;
+                case "hold-pid":
+                    // Record our pid (best effort; the launcher also records it),
+                    // then sleep while keeping the inherited stdout handle (the
+                    // runner's pipe) open without writing to it.
+                    string selfPidFile = args.Length > 2 ? args[2] : "";
+                    int selfSeconds = args.Length > 3 && int.TryParse(args[3], out int ss) ? ss : 30;
+                    if (selfPidFile.Length > 0)
+                    {
+                        try { if (!System.IO.File.Exists(selfPidFile)) System.IO.File.WriteAllText(selfPidFile, Environment.ProcessId.ToString()); }
+                        catch { }
+                    }
+                    Thread.Sleep(TimeSpan.FromSeconds(selfSeconds));
+                    return 0;
                 case "touch":
                     System.IO.File.WriteAllText(value, "changed during verification\n");
                     return 0;

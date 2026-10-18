@@ -19,6 +19,7 @@ namespace MiniHarness.Tests
             tests.Add(("[v1-process] timeout kills the one-shot process and reports it", TimeoutScenario));
             tests.Add(("[v1-process] user cancellation reclaims the process and its child tree", CancellationScenario));
             tests.Add(("[v1-process] cancelling a still-chatting process reclaims it within a hard wall-clock bound", CancellationDrainBoundScenario));
+            tests.Add(("[v1-process] a launcher that exits early while a child holds the output pipes is bounded and reclaimed", OrphanedHolderScenario));
             tests.Add(("[v1-verify] profile pass/fail evidence is bound to the real exit code and revision", VerificationScenario));
             tests.Add(("[v1-verify] zero-test and missing marker do not produce passing evidence", ZeroTestScenario));
             tests.Add(("[v1-verify] a change during the run invalidates passing evidence", ChangeDuringRunScenario));
@@ -171,6 +172,56 @@ namespace MiniHarness.Tests
             finally
             {
                 if (pid > 0) { try { System.Diagnostics.Process.GetProcessById(pid).Kill(true); } catch { } }
+                if (Directory.Exists(dir)) Directory.Delete(dir, true);
+            }
+        }
+
+        // Regression: launcher exits immediately after spawning a child that
+        // inherits our redirected stdout/stderr handles. The parent reaches EOF,
+        // but the surviving orphan keeps the pipes open. Before the fix the normal
+        // exit branch awaited drain completion with no deadline (observed >3.5s on
+        // a 1s timeout, runner not completed, child still alive) and ultimately
+        // mis-reported state=Exited/exitCode=0. Now the timeout must bound the
+        // drain too: bounded TimedOut result and the orphan reclaimed via job.
+        private static async Task OrphanedHolderScenario()
+        {
+            string dir = Path.Combine(Path.GetTempPath(), "miniharness-v1-orphan-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            int childPid = 0;
+            try
+            {
+                var runner = new ProcessRunner();
+                string pidFile = Path.Combine(dir, "holder.pid");
+                // Generous deadline so the launcher reliably spawns the holder and
+                // exits first (the path under test); the holder sleeps 30s holding
+                // the pipe, so the drain still cannot reach EOF and must be reclaimed.
+                var spec = new ProcessSpecification
+                {
+                    FileName = Exe, Arguments = new[] { "--self", "spawn-hold", pidFile, "30" },
+                    WorkingDirectory = Path.GetTempPath(), TimeoutSeconds = 3, MaxOutputBytes = 4_096
+                };
+
+                var watch = System.Diagnostics.Stopwatch.StartNew();
+                var result = await runner.RunAsync(spec, default);
+                watch.Stop();
+
+                await WaitForFileAsync(pidFile);
+                childPid = int.Parse(await File.ReadAllTextAsync(pidFile));
+                Check.True(result.State != ProcessOutcomeState.Exited,
+                    "an orphaned holder must never be reported as a clean Exited, got " + result.State);
+                Check.True(result.State == ProcessOutcomeState.TimedOut,
+                    "orphaned pipe holder after an early launcher exit must be TimedOut, got " + result.State);
+                Check.True(watch.Elapsed < TimeSpan.FromSeconds(15),
+                    "the timeout must bound BOTH exit-wait and drain; took " + watch.Elapsed);
+
+                // The orphaned child (not just the launcher) must be reclaimed.
+                bool dead = await WaitDeadAsync(childPid, TimeSpan.FromSeconds(8));
+                Check.True(dead, "the surviving child holding the pipes must be killed with the job tree");
+                childPid = 0;
+            }
+            finally
+            {
+                if (childPid > 0) { try { System.Diagnostics.Process.GetProcessById(childPid).Kill(true); } catch { } }
                 if (Directory.Exists(dir)) Directory.Delete(dir, true);
             }
         }
