@@ -23,6 +23,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MiniHarness.LiveTests", "te
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MiniHarness.Coding", "src\MiniHarness.Coding\MiniHarness.Coding.csproj", "{77D7EEF6-8CCB-451D-93EF-FA75A3DE14D7}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MiniHarness.ProcessFixture", "tests\MiniHarness.ProcessFixture\MiniHarness.ProcessFixture.csproj", "{FD09884C-7178-4AB2-8058-91302ADBC71D}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -129,6 +131,18 @@ Global
 		{77D7EEF6-8CCB-451D-93EF-FA75A3DE14D7}.Release|x64.Build.0 = Release|Any CPU
 		{77D7EEF6-8CCB-451D-93EF-FA75A3DE14D7}.Release|x86.ActiveCfg = Release|Any CPU
 		{77D7EEF6-8CCB-451D-93EF-FA75A3DE14D7}.Release|x86.Build.0 = Release|Any CPU
+		{FD09884C-7178-4AB2-8058-91302ADBC71D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{FD09884C-7178-4AB2-8058-91302ADBC71D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{FD09884C-7178-4AB2-8058-91302ADBC71D}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{FD09884C-7178-4AB2-8058-91302ADBC71D}.Debug|x64.Build.0 = Debug|Any CPU
+		{FD09884C-7178-4AB2-8058-91302ADBC71D}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{FD09884C-7178-4AB2-8058-91302ADBC71D}.Debug|x86.Build.0 = Debug|Any CPU
+		{FD09884C-7178-4AB2-8058-91302ADBC71D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{FD09884C-7178-4AB2-8058-91302ADBC71D}.Release|Any CPU.Build.0 = Release|Any CPU
+		{FD09884C-7178-4AB2-8058-91302ADBC71D}.Release|x64.ActiveCfg = Release|Any CPU
+		{FD09884C-7178-4AB2-8058-91302ADBC71D}.Release|x64.Build.0 = Release|Any CPU
+		{FD09884C-7178-4AB2-8058-91302ADBC71D}.Release|x86.ActiveCfg = Release|Any CPU
+		{FD09884C-7178-4AB2-8058-91302ADBC71D}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -142,5 +156,6 @@ Global
 		{866B95BC-86EE-4CCE-B7AE-1E54C8FAFB40} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 		{B63988D2-D701-4404-9133-2B7B5D8A589D} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 		{77D7EEF6-8CCB-451D-93EF-FA75A3DE14D7} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
+		{FD09884C-7178-4AB2-8058-91302ADBC71D} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 	EndGlobalSection
 EndGlobal

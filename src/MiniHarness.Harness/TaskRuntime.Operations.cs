@@ -44,10 +44,11 @@ namespace MiniHarness.Harness
             foreach (var operation in pending)
             {
                 ct.ThrowIfCancellationRequested();
+                if (await YieldForSteeringAsync(task, turn, lease)) return false;
                 await RefreshWorkspaceAsync(task, turn, ct).ConfigureAwait(false);
                 var step = task.Steps.Single(s => s.Id == operation.StepId);
                 var current = CaptureCapabilities(task);
-                if (current.Version != step.Capabilities.Version || current.PolicyVersion != step.Capabilities.PolicyVersion ||
+                if (step.SteeringRevision != task.SteeringRevision || current.Version != step.Capabilities.Version || current.PolicyVersion != step.Capabilities.PolicyVersion ||
                     JsonSerializer.Serialize(task.Facts.Workspace, TaskJson.Options) != JsonSerializer.Serialize(step.Capabilities.Workspace, TaskJson.Options))
                 {
                     // Close the stale suffix explicitly; never transfer an old
@@ -75,13 +76,23 @@ namespace MiniHarness.Harness
                     Wait(task, turn, WaitReason.Approval, admission.Reason); Emit(task, "ApprovalRequired", turn, admission.Reason, operation);
                     await CommitAsync(lease, task).ConfigureAwait(false); return false;
                 }
+                if (await YieldForSteeringAsync(task, turn, lease)) return false;
                 operation.Status = OperationStatus.Started; task.Budget.ToolCalls++; turn.ToolCalls++;
                 Emit(task, "OperationStarted", turn, operation.Call.Name, operation);
                 await CommitAsync(lease, task).ConfigureAwait(false);
                 var outcome = admission.Allowed ? await executor.ExecuteAsync(tool!, TaskJson.Clone(operation.Call), context, ct).ConfigureAwait(false)
                     : new ToolOutcome { Status = ToolCallStatus.Rejected, Output = admission.Reason, Effect = EffectState.None };
+                if (outcome.WaitRequest != null)
+                {
+                    var waitingResource = task.Resources.Concat(outcome.Resources).SingleOrDefault(r => r.Id == outcome.WaitRequest.ResourceId);
+                    if (waitingResource != null && resourceManagers.TryGetValue(waitingResource.Kind, out var waitManager) && waitManager is IResourceWaitPolicy limits)
+                        outcome.WaitRequest.WaitMilliseconds = Math.Clamp(outcome.WaitRequest.WaitMilliseconds, 1, limits.MaxWaitMilliseconds);
+                }
+                if (outcome.WaitRequest != null && task.ResourceWaits.Any(w => w.TurnId == turn.Id && w.Status == "active"))
+                    outcome = new ToolOutcome { Status = ToolCallStatus.Failed, Output = "Only one resource wait is allowed per batch.", Effect = EffectState.None };
                 if (outcome.Effect == EffectState.Unknown || outcome.Effect == EffectState.Partial)
                 {
+                    ApplyResourceChanges(task, operation, outcome);
                     operation.Outcome = outcome; operation.Effect = outcome.Effect; operation.Status = OperationStatus.Unknown;
                     Wait(task, turn, WaitReason.Reconciliation, "uncertain_tool_effect");
                     await CommitAsync(lease, task).ConfigureAwait(false); return false;
@@ -89,12 +100,22 @@ namespace MiniHarness.Harness
                 FinishOperation(task, turn, operation, outcome);
                 await CommitAsync(lease, task).ConfigureAwait(false);
             }
+            if (task.ResourceWaits.Any(w => w.TurnId == turn.Id && w.Status == "active"))
+            { Wait(task, turn, WaitReason.Resource, "resource_wait"); await CommitAsync(lease, task); return false; }
             if (pending.Count > 0) turn.Settings.Options.ToolChoice = "auto";
             return true;
         }
         private static void FinishOperation(AgentTaskState task, TaskTurn turn, ToolOperation operation, ToolOutcome outcome)
         {
             outcome = TaskJson.Clone(outcome);
+            if (outcome.WaitRequest != null && (outcome.WaitRequest.WaitMilliseconds < 1 || outcome.WaitRequest.WaitMilliseconds > 600000 ||
+                !task.Resources.Concat(outcome.Resources).Any(r => r.Id == outcome.WaitRequest.ResourceId))) throw new ArgumentException("Invalid wait request.");
+            ApplyResourceChanges(task, operation, outcome);
+            if (outcome.WaitRequest != null) RegisterWait(task, turn, outcome.WaitRequest);
+            FinishOperationRecord(task, turn, operation, outcome);
+        }
+        private static void ApplyResourceChanges(AgentTaskState task, ToolOperation operation, ToolOutcome outcome)
+        {
             foreach (var resource in outcome.Resources)
                 if (string.IsNullOrWhiteSpace(resource.Id) || (resource.OwnerTaskId.Length > 0 && resource.OwnerTaskId != task.Id) ||
                     (resource.OwnerOperationId.Length > 0 && resource.OwnerOperationId != operation.Id) || task.Resources.Any(r => r.Id == resource.Id))
@@ -102,11 +123,25 @@ namespace MiniHarness.Harness
             if (outcome.Resources.Select(r => r.Id).Distinct(StringComparer.Ordinal).Count() != outcome.Resources.Count)
                 throw new InvalidOperationException("Duplicate resource identity.");
             if (outcome.Evidence.Any(e => e.TaskId.Length > 0 && e.TaskId != task.Id)) throw new InvalidOperationException("Invalid evidence ownership.");
+            var updates = outcome.ResourceUpdates ?? new System.Collections.Generic.List<ResourceReference>();
+            if (updates.Select(r => r.Id).Distinct(StringComparer.Ordinal).Count() != updates.Count) throw new InvalidOperationException("Duplicate resource update.");
+            foreach (var update in updates)
+            {
+                var existing = task.Resources.SingleOrDefault(r => r.Id == update.Id);
+                if (existing == null || existing.Kind != update.Kind || existing.OwnerTaskId != update.OwnerTaskId ||
+                    existing.OwnerOperationId != update.OwnerOperationId) throw new InvalidOperationException("Resource update cannot change ownership.");
+            }
             foreach (var resource in outcome.Resources)
             {
                 resource.OwnerTaskId = task.Id; resource.OwnerOperationId = operation.Id;
                 task.Resources.Add(TaskJson.Clone(resource));
             }
+            foreach (var update in updates) task.Resources[task.Resources.FindIndex(r => r.Id == update.Id)] = TaskJson.Clone(update);
+            foreach (var resource in outcome.Resources.Concat(updates))
+                if (resource.Process?.OutputArtifact != null) RegisterArtifact(task, resource.Process.OutputArtifact);
+        }
+        private static void FinishOperationRecord(AgentTaskState task, TaskTurn turn, ToolOperation operation, ToolOutcome outcome)
+        {
             operation.Outcome = outcome; operation.Status = OperationStatus.Finished; operation.Effect = outcome.Effect;
             // Continuation mode belongs to the same durable transition as the
             // last result. A crash before the next model step must not force a

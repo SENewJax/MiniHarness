@@ -11,6 +11,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using MiniHarness.Abstractions;
 using MiniHarness.Coding;
+using MiniHarness.Coding.Processes;
 using MiniHarness.Harness;
 using MiniHarness.Model.OpenAI;
 
@@ -39,6 +40,8 @@ namespace MiniHarness.Server
             var storage = builder.Configuration.GetSection("Storage").Get<StorageOptions>() ?? new StorageOptions();
             var toolOptions = builder.Configuration.GetSection("Tools").Get<ToolsOptions>() ?? new ToolsOptions();
             var codingOptions = builder.Configuration.GetSection("Coding").Get<CodingOptions>() ?? new CodingOptions();
+            var processOptions = builder.Configuration.GetSection("Processes").Get<ProcessServerOptions>() ?? new ProcessServerOptions();
+            builder.Services.AddSingleton(processOptions);
             server.Validate(); model.Validate(); harness.Validate();
             builder.WebHost.ConfigureKestrel(k => k.Limits.MaxRequestBodySize = server.MaxRequestBodyBytes);
             builder.Services.AddSingleton(server);
@@ -66,6 +69,28 @@ namespace MiniHarness.Server
             {
                 registeredTools.AddRange(coding.Tools);
                 allowedNames.AddRange(coding.Tools.Select(t => t.Definition.Name));
+            }
+            if (processOptions.Enabled)
+            {
+                if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Background process ownership is unavailable on this platform.");
+                if (processOptions.Limits.MaxPageBytes > harness.MaxToolOutputCharacters) throw new ArgumentException("Process page budget must fit the tool output limit.");
+                if (processOptions.PollMilliseconds < 50 || processOptions.PollMilliseconds > 5000) throw new ArgumentException("Invalid process polling interval.");
+                processOptions.Limits.Directory = Path.GetFullPath(Path.IsPathRooted(processOptions.Limits.Directory) ? processOptions.Limits.Directory : Path.Combine(builder.Environment.ContentRootPath, processOptions.Limits.Directory));
+                if (server.WorkspaceRoot.Length > 0)
+                {
+                    string workspace = Path.TrimEndingDirectorySeparator(Path.GetFullPath(server.WorkspaceRoot));
+                    if (processOptions.Limits.Directory.Equals(workspace, StringComparison.OrdinalIgnoreCase) || processOptions.Limits.Directory.StartsWith(workspace + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                        throw new ArgumentException("Process state must be outside the source workspace.");
+                }
+                var sessions = new ProcessSessionManager(processOptions.Limits, processOptions.Profiles);
+                var processTools = ProcessTool.CreateAll(sessions);
+                registeredTools.AddRange(processTools);
+                allowedNames.AddRange(processTools.Select(t => t.Definition.Name));
+                // Factory registration lets DI own disposal even when a caller
+                // disposes an app without completing its explicit Stop path.
+                builder.Services.AddSingleton<ProcessSessionManager>(_ => sessions);
+                builder.Services.AddSingleton<IResourceManager>(services => services.GetRequiredService<ProcessSessionManager>());
+                builder.Services.AddHostedService<ResourceWakeupService>();
             }
             builder.Services.AddSingleton<IToolRegistry>(new ToolRegistry(registeredTools));
             builder.Services.AddSingleton<IToolPolicy>(new AllowListToolPolicy(allowedNames));
@@ -98,6 +123,7 @@ namespace MiniHarness.Server
                 services.GetRequiredService<TaskRuntime>(), services.GetRequiredService<ITaskInitializer>()));
             builder.Services.AddSingleton<ITaskApplicationService>(services => services.GetRequiredService<TaskApplicationService>());
             builder.Services.AddSingleton<ITaskRuntime>(services => services.GetRequiredService<ITaskApplicationService>());
+            builder.Services.AddSingleton<IResourceOutputAccess>(services => services.GetRequiredService<TaskApplicationService>());
             builder.Services.AddSingleton<ProtocolAgentService>();
             builder.Services.AddSingleton<IAgentService>(services => services.GetRequiredService<ProtocolAgentService>());
             builder.Services.AddSingleton<IAgentRunner>(services => services.GetRequiredService<ProtocolAgentService>());

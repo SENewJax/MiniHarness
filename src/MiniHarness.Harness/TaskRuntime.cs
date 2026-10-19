@@ -10,7 +10,7 @@ using MiniHarness.Abstractions;
 namespace MiniHarness.Harness
 {
     // Owns task lifetime. HTTP cancellation only stops the caller's wait.
-    public sealed partial class TaskRuntime : ITaskRuntime, IAsyncDisposable
+    public sealed partial class TaskRuntime : ITaskRuntime, IResourceOutputAccess, IAsyncDisposable
     {
         private readonly ITaskStore store;
         private readonly IModelProvider model;
@@ -29,6 +29,7 @@ namespace MiniHarness.Harness
         private readonly ConcurrentDictionary<long, Task> active = new ConcurrentDictionary<long, Task>();
         private long invocation;
         private volatile bool disposed;
+        private volatile bool stopping;
 
         public TaskRuntime(IModelProvider model, ITaskStore store, HarnessOptions options, ModelBinding binding,
             IContextBuilder? context = null, IToolRegistry? tools = null, IToolPolicy? toolPolicy = null,
@@ -58,6 +59,9 @@ namespace MiniHarness.Harness
         private (string Id, Task<TaskCommandResult> Execution, Task<CommandReceipt> Accepted) Schedule(TaskCommand command)
         {
             if (disposed) throw new ObjectDisposedException(nameof(TaskRuntime));
+            if (stopping && command.Kind != TaskCommandKind.QueryResource && command.Kind != TaskCommandKind.CancelResource &&
+                command.Kind != TaskCommandKind.ReconcileResources && command.Kind != TaskCommandKind.Cancel && command.Kind != TaskCommandKind.Pause)
+                throw new TaskConflictException("Runtime is stopping; no new advancement accepted.");
             var copy = TaskJson.Clone(command);
             if (string.IsNullOrWhiteSpace(copy.Id) || copy.Id.Length > 128) throw new ArgumentException("Command ID is required (maximum 128 characters).");
             string id = copy.Kind == TaskCommandKind.Start ? "task_" + TaskJson.Hash(copy.Id).Substring(0, 32)
@@ -117,6 +121,11 @@ namespace MiniHarness.Harness
                             slot.Cancellation?.Cancel();
                         }
                     }
+                    if (copy.Kind == TaskCommandKind.Steer)
+                    {
+                        ValidateSteeringPayload(copy.Steering);
+                        lock (slot.Sync) { slot.Steering.Add(copy.Id); }
+                    }
                 }
                 finally { slot.Admission.Release(); }
                 transferred = true;
@@ -135,6 +144,7 @@ namespace MiniHarness.Harness
                     lock (slot.Sync)
                     {
                         slot.Pending.Remove(copy.Id);
+                        slot.Steering.Remove(copy.Id);
                         slot.Controls.Remove(copy.Id);
                         if (!disposed) UpdateInterrupt(slot);
                     }
@@ -164,6 +174,9 @@ namespace MiniHarness.Harness
             try
             {
                 if (disposed) throw new ObjectDisposedException(nameof(TaskRuntime));
+                if (stopping && command.Kind != TaskCommandKind.QueryResource && command.Kind != TaskCommandKind.CancelResource &&
+                    command.Kind != TaskCommandKind.ReconcileResources && command.Kind != TaskCommandKind.Cancel && command.Kind != TaskCommandKind.Pause)
+                    throw new TaskConflictException("Queued advancement rejected during shutdown.");
                 await using var lease = await store.AcquireAsync(id, CancellationToken.None).ConfigureAwait(false);
                 var task = await lease.LoadAsync(CancellationToken.None).ConfigureAwait(false);
                 string fingerprint = CommandFingerprint(command);
@@ -180,11 +193,14 @@ namespace MiniHarness.Harness
                 task ??= await NewTaskAsync(id, command).ConfigureAwait(false);
                 bool terminal = task.Status == AgentTaskStatus.Completed || task.Status == AgentTaskStatus.Cancelled || task.Status == AgentTaskStatus.Failed;
                 if (terminal && !(command.Kind == TaskCommandKind.Cancel && task.Status == AgentTaskStatus.Cancelled) && command.Kind != TaskCommandKind.Reconcile &&
-                    command.Kind != TaskCommandKind.QueryResource && command.Kind != TaskCommandKind.CancelResource && command.Kind != TaskCommandKind.ReconcileResources && command.Kind != TaskCommandKind.CollectChild)
+                    command.Kind != TaskCommandKind.QueryResource && command.Kind != TaskCommandKind.CancelResource && command.Kind != TaskCommandKind.ReconcileResources && command.Kind != TaskCommandKind.CollectChild && command.Kind != TaskCommandKind.ResourceWake)
                     throw new TaskConflictException("Terminal task cannot be advanced.");
-                if (task.Model.Model != binding.Model || (task.Model.Protocol != "Unspecified" && task.Model.Protocol != binding.Protocol))
+                bool controlOnly = command.Kind == TaskCommandKind.QueryResource || command.Kind == TaskCommandKind.CancelResource ||
+                    command.Kind == TaskCommandKind.ReconcileResources || command.Kind == TaskCommandKind.WriteResourceInput ||
+                    command.Kind == TaskCommandKind.Pause || command.Kind == TaskCommandKind.Cancel;
+                if (!controlOnly && (task.Model.Model != binding.Model || (task.Model.Protocol != "Unspecified" && task.Model.Protocol != binding.Protocol)))
                     throw new TaskConflictException("Task model/protocol binding differs from this runtime.");
-                task.Model = TaskJson.Clone(binding);
+                if (!controlOnly) task.Model = TaskJson.Clone(binding);
                 TaskTurn? turn = task.Turns.LastOrDefault();
                 bool advance = false;
                 switch (command.Kind)
@@ -260,6 +276,16 @@ namespace MiniHarness.Harness
                     case TaskCommandKind.RefreshWorkspace:
                         await RefreshWorkspaceAsync(task, turn, CancellationToken.None).ConfigureAwait(false);
                         break;
+                    case TaskCommandKind.Steer:
+                        advance = ApplySteering(task, turn, command);
+                        lock (slot.Sync) slot.Steering.Remove(command.Id);
+                        break;
+                    case TaskCommandKind.ResourceWake:
+                        advance = await WakeAsync(task, turn, command, lease);
+                        break;
+                    case TaskCommandKind.WriteResourceInput:
+                        await WriteResourceInputAsync(task, turn, lease, command);
+                        break;
                     case TaskCommandKind.QueryResource:
                     case TaskCommandKind.CancelResource:
                     case TaskCommandKind.ReconcileResources:
@@ -276,8 +302,17 @@ namespace MiniHarness.Harness
                         task.Status = command.Kind == TaskCommandKind.Cancel ? AgentTaskStatus.Cancelled : AgentTaskStatus.Paused;
                         if (command.Kind == TaskCommandKind.Cancel)
                         {
+                            if (turn != null) InvalidateWaits(task, turn);
+                            task.Wait = WaitReason.Reconciliation;
+                            if (turn != null && turn.Status != TurnStatus.Completed) { turn.Status = TurnStatus.Interrupted; turn.Wait = task.Wait; }
+                            Emit(task, "TaskCancellationRequested", turn);
+                            await CommitAsync(lease, task);
                             await CancelResourcesAsync(task, lease).ConfigureAwait(false);
                             await CancelChildrenAsync(task, command.Id).ConfigureAwait(false);
+                            bool unresolved = task.Operations.Any(o => o.Status == OperationStatus.Unknown || o.Status == OperationStatus.Started) ||
+                                task.ResourceInputs.Any(i => i.Status != "finished" && i.Status != "absent") || task.Resources.Any(r => !ResourceFinished(r)) || task.Children.Any(c => !c.Collected);
+                            task.Wait = unresolved ? WaitReason.Reconciliation : WaitReason.None;
+                            if (turn != null) turn.Wait = task.Wait;
                         }
                         if (turn != null && turn.Status != TurnStatus.Completed) turn.Status = TurnStatus.Interrupted;
                         Emit(task, command.Kind.ToString(), turn);
@@ -383,8 +418,23 @@ namespace MiniHarness.Harness
             while (true)
             {
             cancellationToken.ThrowIfCancellationRequested();
+            if (UncertainResources(task))
+            { Wait(task, turn, WaitReason.Reconciliation, "uncertain_resource_or_input"); await CommitAsync(lease, task); return; }
+            if (await YieldForSteeringAsync(task, turn, lease)) return;
+            if (task.ResourceWaits.Any(w => w.TurnId == turn.Id && w.Status == "active") &&
+                task.Operations.Where(o => o.TurnId == turn.Id).All(o => o.Status == OperationStatus.Finished))
+                if (!await ConsumeWaitAsync(task, turn, lease)) return;
+            var candidateWait = task.ResourceWaits.LastOrDefault(w => w.TurnId == turn.Id && w.CompletionCandidate && w.Status != "active" && w.Status != "invalidated");
+            if (candidateWait != null && turn.LastResponse?.Message.ToolCalls.Count == 0)
+            {
+                candidateWait.CompletionCandidate = false;
+                // A timeout is feedback for a new decision, not permission to
+                // register another wait for the same stale completion candidate.
+                if (candidateWait.Status == "consumed" && await FinishCandidateAsync(task, turn, lease, cancellationToken)) return;
+            }
             await RefreshWorkspaceAsync(task, turn, cancellationToken).ConfigureAwait(false);
             if (!await ProcessOperationsAsync(task, turn, lease, cancellationToken).ConfigureAwait(false)) return;
+            FlushObservations(task, turn);
             if (turn.Wait == WaitReason.Evidence && turn.LastResponse != null && turn.LastResponse.Message.ToolCalls.Count == 0)
                 if (await FinishCandidateAsync(task, turn, lease, cancellationToken).ConfigureAwait(false)) return;
             if (task.Budget.ModelCalls + task.Budget.ReservedModelCalls >= task.Budget.MaxModelCalls || task.Budget.Usage.TotalTokens + task.Budget.ReservedTokens >= task.Budget.MaxTokens ||
@@ -393,7 +443,7 @@ namespace MiniHarness.Harness
                 Wait(task, turn, WaitReason.Budget, "task_budget"); await CommitAsync(lease, task).ConfigureAwait(false); return;
             }
             task.Status = AgentTaskStatus.Running; task.Wait = WaitReason.None; turn.Status = TurnStatus.Running;
-            var step = new TaskStep { TurnId = turn.Id, Status = StepStatus.Preparing, Model = TaskJson.Clone(binding), Capabilities = CaptureCapabilities(task) };
+            var step = new TaskStep { TurnId = turn.Id, Status = StepStatus.Preparing, Model = TaskJson.Clone(binding), Capabilities = CaptureCapabilities(task), SteeringRevision = task.SteeringRevision };
             task.Steps.Add(step); Emit(task, "StepPreparing", turn);
             await CommitAsync(lease, task).ConfigureAwait(false);
             var prepared = await preparation.PrepareAsync(new ContextPreparation
@@ -421,6 +471,7 @@ namespace MiniHarness.Harness
                 Wait(task, turn, WaitReason.ModelLimit, response.Finish.ToString()); await CommitAsync(lease, task).ConfigureAwait(false); return;
             }
             ToolCallRules.ValidateChoice(request.Options.ToolChoice, response.Message.ToolCalls);
+            if (response.Message.ToolCalls.Count == 0 && await YieldForSteeringAsync(task, turn, lease)) return;
             if ((options.StopWhenUsageUnknown && !task.Budget.Usage.Known) || task.Budget.Usage.TotalTokens >= task.Budget.MaxTokens)
             {
                 Wait(task, turn, WaitReason.Budget, task.Budget.Usage.Known ? "token_budget" : "unknown_token_usage"); await CommitAsync(lease, task).ConfigureAwait(false); return;
@@ -456,7 +507,12 @@ namespace MiniHarness.Harness
         private static Task CommitAsync(ITaskLease lease, AgentTaskState task) => lease.CommitAsync(task, task.Revision, CancellationToken.None);
         public async ValueTask DisposeAsync()
         {
+            await StopAdvancementAsync();
             disposed = true;
+        }
+        public async Task StopAdvancementAsync()
+        {
+            stopping = true;
             foreach (var slot in slots.Values)
                 lock (slot.Sync) { slot.Interrupt = TaskCommandKind.Pause; slot.Cancellation?.Cancel(); }
             try { await Task.WhenAll(active.Values.ToArray()).ConfigureAwait(false); }
@@ -472,6 +528,7 @@ namespace MiniHarness.Harness
             public CancellationTokenSource? Cancellation { get; set; }
             public TaskCommandKind? Interrupt { get; set; }
             public Dictionary<string, TaskCommandKind> Controls { get; } = new Dictionary<string, TaskCommandKind>();
+            public HashSet<string> Steering { get; } = new HashSet<string>();
         }
         private static void UpdateInterrupt(Slot slot)
         {
@@ -483,6 +540,10 @@ namespace MiniHarness.Harness
             // Preserve fingerprints of pre-extension commands in schema v1.
             var original = new { command.Id, command.TaskId, command.Kind, command.Request, command.ForkedFromResponseId,
                 command.Facts, command.OperationId, command.Approve, command.Results, command.Evidence, command.ReconciledOutcome };
+            if (command.Kind == TaskCommandKind.Steer || command.Kind == TaskCommandKind.ResourceWake || command.Kind == TaskCommandKind.WriteResourceInput ||
+                command.Steering != null || command.Wake != null || command.ResourceInput != null)
+                return TaskJson.Hash(JsonSerializer.Serialize(new { Version = 2, Command = original, command.ResourceId,
+                    command.Steering, command.Wake, command.ResourceInput }, TaskJson.Options));
             if (command.ResourceId == null && command.ChildTaskId == null && command.ParentTaskId == null && command.ChildBudget == null)
                 return TaskJson.Hash(JsonSerializer.Serialize(original, TaskJson.Options));
             return TaskJson.Hash(JsonSerializer.Serialize(new { Command = original, command.ResourceId, command.ChildTaskId,

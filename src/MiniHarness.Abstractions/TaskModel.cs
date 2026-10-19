@@ -1,16 +1,17 @@
 using System;
 using System.Collections.Generic;
+using System.Text.Json.Serialization;
 
 namespace MiniHarness.Abstractions
 {
     public enum AgentTaskStatus { Ready, Running, Waiting, Paused, Completed, Cancelled, Failed }
     public enum TurnStatus { Ready, Running, Waiting, Completed, Interrupted, Failed }
-    public enum WaitReason { None, Input, Approval, ExternalResult, Reconciliation, Evidence, Budget, ModelLimit, CapabilityChanged }
+    public enum WaitReason { None, Input, Approval, ExternalResult, Reconciliation, Evidence, Budget, ModelLimit, CapabilityChanged, Resource }
     public enum OperationStatus { Proposed, WaitingApproval, Started, Finished, Unknown }
     public enum EffectState { None, Confirmed, Partial, Unknown }
     public enum ApprovalState { None, Approved, Denied }
     public enum StepStatus { Preparing, Ready, Running, Responded, Interrupted }
-    public enum TaskCommandKind { Start, Input, Approval, ExternalResult, Pause, Cancel, Resume, Evidence, RefreshWorkspace, Reconcile, QueryResource, CancelResource, ReconcileResources, StartChild, CollectChild }
+    public enum TaskCommandKind { Start, Input, Approval, ExternalResult, Pause, Cancel, Resume, Evidence, RefreshWorkspace, Reconcile, QueryResource, CancelResource, ReconcileResources, StartChild, CollectChild, WriteResourceInput, ResourceWake, Steer }
     public enum ResourceAction { Query, Cancel, Reconcile }
 
     public sealed class ModelBinding
@@ -83,6 +84,7 @@ namespace MiniHarness.Abstractions
         public CapabilitySnapshot Capabilities { get; set; } = new CapabilitySnapshot();
         // Frozen finite model view, separate from task facts and execution history.
         public ModelRequest? PreparedRequest { get; set; }
+        public int SteeringRevision { get; set; }
     }
     public sealed class ToolOperation
     {
@@ -106,6 +108,8 @@ namespace MiniHarness.Abstractions
         public string State { get; set; } = "unknown";
         public string RecoveryHint { get; set; } = "";
         public string Result { get; set; } = "";
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public ProcessSnapshot? Process { get; set; }
     }
     public sealed class ChildTaskLink
     {
@@ -143,6 +147,10 @@ namespace MiniHarness.Abstractions
         public string Output { get; set; } = "";
         public EffectState Effect { get; set; }
         public List<ResourceReference> Resources { get; set; } = new List<ResourceReference>();
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public List<ResourceReference>? ResourceUpdates { get; set; }
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public ResourceWaitRequest? WaitRequest { get; set; }
         public List<EvidenceRecord> Evidence { get; set; } = new List<EvidenceRecord>();
         public List<ArtifactReference> Artifacts { get; set; } = new List<ArtifactReference>();
     }
@@ -186,6 +194,10 @@ namespace MiniHarness.Abstractions
         public List<ArtifactReference> Artifacts { get; set; } = new List<ArtifactReference>();
         public List<TaskEvent> Events { get; set; } = new List<TaskEvent>();
         public List<ChildTaskLink> Children { get; set; } = new List<ChildTaskLink>();
+        public List<ResourceWait> ResourceWaits { get; set; } = new List<ResourceWait>();
+        public List<ResourceInputAction> ResourceInputs { get; set; } = new List<ResourceInputAction>();
+        public int SteeringRevision { get; set; }
+        public List<HistoryEntry> DeferredMessages { get; set; } = new List<HistoryEntry>();
     }
     public sealed class TaskResponseReference
     {
@@ -214,6 +226,12 @@ namespace MiniHarness.Abstractions
         public string? ChildTaskId { get; set; }
         public string? ParentTaskId { get; set; }
         public TaskBudget? ChildBudget { get; set; }
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public ResourceInput? ResourceInput { get; set; }
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public ResourceWake? Wake { get; set; }
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public TaskSteering? Steering { get; set; }
     }
     public sealed class TaskCommandResult
     {

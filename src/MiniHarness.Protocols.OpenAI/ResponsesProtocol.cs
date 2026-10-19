@@ -137,7 +137,7 @@ namespace MiniHarness.Protocols.OpenAI
             if (status == "incomplete")
             {
                 string reason = WireJson.String(json.GetProperty("incomplete_details"), "reason");
-                if (reason == "max_output_tokens") finish = ModelFinish.Length;
+                if (reason == "max_output_tokens" || reason == "length") finish = ModelFinish.Length;
                 else if (reason == "content_filter") finish = ModelFinish.ContentFiltered;
                 else throw new ModelException("Unsupported incomplete reason: " + reason);
             }

@@ -5,5 +5,7 @@
     <ProjectReference Include="../../src/MiniHarness.Model.OpenAI/MiniHarness.Model.OpenAI.csproj" />
     <ProjectReference Include="../../src/MiniHarness.Harness/MiniHarness.Harness.csproj" />
     <ProjectReference Include="../../src/MiniHarness.Server/MiniHarness.Server.csproj" />
+    <ProjectReference Include="../MiniHarness.ProcessFixture/MiniHarness.ProcessFixture.csproj" />
+    <None Include="../MiniHarness.ProcessFixture/bin/$(Configuration)/$(TargetFramework)/MiniHarness.ProcessFixture.runtimeconfig.json" Link="MiniHarness.ProcessFixture.runtimeconfig.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

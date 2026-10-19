@@ -23,6 +23,7 @@ namespace MiniHarness.LiveTests
             if (args.FirstOrDefault() == "--runtime") return await ValidateRuntimeAsync(args.Skip(1).ToArray());
             if (args.FirstOrDefault() == "--coding") return await ValidateCodingAsync(args.Skip(1).ToArray());
             if (args.FirstOrDefault() == "--coding-fixture") return await ValidateCodingAsync(new[] { "Offline" });
+            if (args.FirstOrDefault() == "--long-running") return await ValidateLongRunningAsync(args.Skip(1).ToArray());
             string key = "";
             try
             {

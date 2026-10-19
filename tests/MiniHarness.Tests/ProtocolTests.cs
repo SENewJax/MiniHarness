@@ -68,13 +68,31 @@ namespace MiniHarness.Tests
             return Task.CompletedTask;
         }
 
-        private static Task Truncated()
+        private static async Task Truncated()
         {
             using var chat = JsonDocument.Parse("{\"choices\":[{\"finish_reason\":\"length\",\"message\":{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"c\",\"type\":\"function\",\"function\":{\"name\":\"add\",\"arguments\":\"{\"}}]}}]}");
             Check.Equal(ModelFinish.Length, new ChatCompletionsProtocol().ReadResponse(chat.RootElement).Finish);
             using var responses = JsonDocument.Parse("{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"output\":[{\"type\":\"function_call\",\"call_id\":\"c\",\"name\":\"add\",\"arguments\":\"{\"}]}");
             Check.Equal(ModelFinish.Length, new ResponsesProtocol().ReadResponse(responses.RootElement).Finish);
-            return Task.CompletedTask;
+            foreach (string reason in new[] { "max_output_tokens", "length" })
+                foreach (string arguments in new[] { "{", "{\"a\":2,\"b\":3}" })
+                {
+                    using var fixture = JsonDocument.Parse(JsonSerializer.Serialize(new
+                    {
+                        status = "incomplete", incomplete_details = new { reason },
+                        output = new[] { new { type = "function_call", call_id = "truncated", name = "add", arguments } },
+                        usage = new { input_tokens = 1, output_tokens = 2 }
+                    }));
+                    var parsed = new ResponsesProtocol().ReadResponse(fixture.RootElement);
+                    Check.Equal(ModelFinish.Length, parsed.Finish);
+                    var options = new HarnessOptions();
+                    var runner = new AgentRunner(new ScriptedModel(parsed), new ContextBuilder(options),
+                        new ToolRegistry(new[] { new MiniHarness.Server.AddTool() }), new AllowListToolPolicy(new[] { "add" }),
+                        new ToolExecutor(options), new NaturalStopPolicy(), new MemoryStore(), options);
+                    var state = await runner.RunAsync(HarnessTests.Request(), default);
+                    Check.Equal(RunStatus.WaitingForUser, state.Status); Check.Equal(0, state.ToolCalls);
+                    Check.Equal(0, state.Executions.Count);
+                }
         }
 
         private static Task Refusals()

@@ -23,6 +23,9 @@ namespace MiniHarness.Tests
             HttpTests.Register(tests);
             TaskStageTests.Register(tests);
             ConsistencyTests.Register(tests);
+            V2ProcessTests.Register(tests);
+            V2RuntimeTests.Register(tests);
+            V2ConsistencyTests.Register(tests);
             CodingStageTests.Register(tests);
             VerificationStageTests.Register(tests);
             CodingCompletionPolicyStageTests.Register(tests);
@@ -30,7 +33,7 @@ namespace MiniHarness.Tests
             string stage = args.Length == 2 && args[0] == "--stage" ? args[1] : "all";
             if (args.Length != 0 && (args.Length != 2 || args[0] != "--stage"))
             {
-                Console.WriteLine("Usage: --stage all|legacy|1|2|3|4-5|6|v0-control|v0-replan|v0-resource|v0-child|v0-storage|v1-workspace|v1-mutation|v1-ledger|v1-tool|v1-process|v1-verify|v1-policy|v1-e2e|consistency"); return 2;
+                Console.WriteLine("Usage: --stage all|legacy|1|2|3|4-5|6|v0-control|v0-replan|v0-resource|v0-child|v0-storage|v1-workspace|v1-mutation|v1-ledger|v1-tool|v1-process|v1-verify|v1-policy|v1-e2e|consistency|v2-session|v2-output|v2-resource|v2-wait|v2-steer|v2-recovery|v2-consistency"); return 2;
             }
             tests = tests.FindAll(t => stage == "all" || (stage == "legacy" ? !t.Name.StartsWith("[", StringComparison.Ordinal)
                 : t.Name.StartsWith("[" + stage + "]", StringComparison.Ordinal)));
@@ -73,7 +76,7 @@ namespace MiniHarness.Tests
                     // still carrying data at cancellation time. Optional argument is a
                     // pid file so callers can track/reap the real OS process.
                     string foreverPid = args.Length > 2 ? args[2] : "";
-                    if (foreverPid.Length > 0) System.IO.File.WriteAllText(foreverPid, Environment.ProcessId.ToString());
+                    if (foreverPid.Length > 0) PublishPid(foreverPid, Environment.ProcessId);
                     while (true) { Console.WriteLine("forever " + new string('y', 64)); Thread.Sleep(5); }
                 case "tests":
                     int count = int.TryParse(value, out count) ? count : 0;
@@ -88,7 +91,7 @@ namespace MiniHarness.Tests
                     // pid file to assert the real process (not just the handle) died.
                     string pidFile = args.Length > 2 ? args[2] : "";
                     int pidSeconds = args.Length > 3 && int.TryParse(args[3], out int ps) ? ps : 30;
-                    if (pidFile.Length > 0) System.IO.File.WriteAllText(pidFile, Environment.ProcessId.ToString());
+                    if (pidFile.Length > 0) PublishPid(pidFile, Environment.ProcessId);
                     Thread.Sleep(TimeSpan.FromSeconds(pidSeconds));
                     return 0;
                 case "spawn-sleep":
@@ -105,7 +108,7 @@ namespace MiniHarness.Tests
                         CreateNoWindow = true
                     };
                     System.Diagnostics.Process.Start(child);
-                    if (childPid.Length > 0) System.IO.File.WriteAllText(childPid + ".parent", Environment.ProcessId.ToString());
+                    if (childPid.Length > 0) PublishPid(childPid + ".parent", Environment.ProcessId);
                     Thread.Sleep(TimeSpan.FromSeconds(treeSeconds));
                     return 0;
                 case "spawn-hold":
@@ -127,7 +130,7 @@ namespace MiniHarness.Tests
                         CreateNoWindow = true
                     };
                     var holderProc = System.Diagnostics.Process.Start(holder)!;
-                    if (holdPid.Length > 0) System.IO.File.WriteAllText(holdPid, holderProc.Id.ToString());
+                    if (holdPid.Length > 0) PublishPid(holdPid, holderProc.Id);
                     return 0;
                 case "hold-pid":
                     // Record our pid (best effort; the launcher also records it),
@@ -137,7 +140,7 @@ namespace MiniHarness.Tests
                     int selfSeconds = args.Length > 3 && int.TryParse(args[3], out int ss) ? ss : 30;
                     if (selfPidFile.Length > 0)
                     {
-                        try { if (!System.IO.File.Exists(selfPidFile)) System.IO.File.WriteAllText(selfPidFile, Environment.ProcessId.ToString()); }
+                        try { PublishPid(selfPidFile, Environment.ProcessId); }
                         catch { }
                     }
                     Thread.Sleep(TimeSpan.FromSeconds(selfSeconds));
@@ -150,6 +153,19 @@ namespace MiniHarness.Tests
                 default:
                     return 0;
             }
+        }
+
+        private static void PublishPid(string path, int pid)
+        {
+            string pending = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                File.WriteAllText(pending, pid.ToString());
+                try { File.Move(pending, path); }
+                catch (IOException) when (File.Exists(path))
+                { /* The launcher and its child may publish the same identity. */ }
+            }
+            finally { if (File.Exists(pending)) File.Delete(pending); }
         }
 
         // Real project-under-test for the V1 end-to-end loop. Working directory is

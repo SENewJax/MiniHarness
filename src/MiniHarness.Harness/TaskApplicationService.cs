@@ -8,7 +8,7 @@ namespace MiniHarness.Harness
 {
     // One application boundary for protocol and native requests. The runtime
     // owns execution; this service owns host initialization and caller intent.
-    public sealed class TaskApplicationService : ITaskApplicationService
+    public sealed class TaskApplicationService : ITaskApplicationService, IResourceOutputAccess
     {
         private readonly ITaskRuntime runtime;
         private readonly ITaskInitializer? initializer;
@@ -69,5 +69,8 @@ namespace MiniHarness.Harness
         }
         public Task<AgentTaskState?> GetAsync(string id, CancellationToken ct) => runtime.GetAsync(id, ct);
         public Task<IReadOnlyList<TaskEvent>> ObserveAsync(string id, long after, CancellationToken ct) => runtime.ObserveAsync(id, after, ct);
+        public Task<ProcessOutputPage> ReadResourceOutputAsync(string taskId, string resourceId, long after, int maxBytes, CancellationToken ct)
+            => runtime is IResourceOutputAccess access ? access.ReadResourceOutputAsync(taskId, resourceId, after, maxBytes, ct)
+                : throw new ArgumentException("Resource output is unavailable.");
     }
 }

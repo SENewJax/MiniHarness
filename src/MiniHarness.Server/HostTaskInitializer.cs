@@ -9,8 +9,9 @@ namespace MiniHarness.Server
     {
         private readonly ServerOptions server;
         private readonly CodingTaskSetup codingSetup;
-        public HostTaskInitializer(ServerOptions server, CodingTaskSetup codingSetup)
-        { this.server = server; this.codingSetup = codingSetup; }
+        private readonly ProcessServerOptions? processes;
+        public HostTaskInitializer(ServerOptions server, CodingTaskSetup codingSetup, ProcessServerOptions? processes = null)
+        { this.server = server; this.codingSetup = codingSetup; this.processes = processes; }
         public void Initialize(TaskCommand command)
         {
             command.Facts ??= new TaskFacts { Goal = command.Request?.Messages.FirstOrDefault(m => m.Role == "user")?.Text ?? "" };
@@ -35,6 +36,9 @@ namespace MiniHarness.Server
             }
             command.Facts.Workspace.Grants = server.WorkspaceGrants.ToList();
             codingSetup.Apply(command.Facts);
+            if (processes?.Enabled == true)
+                foreach (var grant in processes.Grants)
+                    if (!command.Facts.Workspace.Grants.Contains(grant)) command.Facts.Workspace.Grants.Add(grant);
         }
     }
 }

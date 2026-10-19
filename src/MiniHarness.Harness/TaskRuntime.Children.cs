@@ -62,6 +62,7 @@ namespace MiniHarness.Harness
             await using var lease = await store.AcquireAsync(childId, CancellationToken.None).ConfigureAwait(false);
             var child = await lease.LoadAsync(CancellationToken.None).ConfigureAwait(false) ?? throw new TaskConflictException("Child has not started.");
             if (child.ParentTaskId != task.Id || child.Children.Any(c => !c.Collected)) throw new TaskConflictException("Invalid child ownership or outstanding descendants.");
+            if (child.Resources.Any(r => !ResourceFinished(r))) throw new TaskConflictException("Child resources require confirmed cleanup before collection.");
             if (child.Turns.LastOrDefault()?.Status != TurnStatus.Completed && child.Status != AgentTaskStatus.Completed &&
                 child.Status != AgentTaskStatus.Cancelled && child.Status != AgentTaskStatus.Failed)
                 throw new TaskConflictException("Child has no final result yet.");
@@ -103,6 +104,9 @@ namespace MiniHarness.Harness
                 if (child.Status != AgentTaskStatus.Completed && child.Status != AgentTaskStatus.Failed)
                     await ExecuteAsync(new TaskCommand { Id = TaskJson.Hash(commandId + ":cancel:" + child.Id),
                         TaskId = child.Id, Kind = TaskCommandKind.Cancel }, CancellationToken.None).ConfigureAwait(false);
+                var stopped = (await store.LoadAsync(child.Id, CancellationToken.None).ConfigureAwait(false))!;
+                if (stopped.Resources.Any(r => !ResourceFinished(r)) || stopped.Children.Any(c => !c.Collected))
+                { link.Result = "Cancellation requested; child cleanup is unconfirmed."; Emit(task, "ChildCancellationUnconfirmed", detail: child.Id); continue; }
                 await CollectChildAsync(task, child.Id).ConfigureAwait(false);
             }
         }

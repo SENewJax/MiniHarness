@@ -102,7 +102,7 @@ namespace MiniHarness.Coding
         // Number of live processes currently in the job, or -1 when it cannot be
         // queried. The list is variable-length; a generous fixed buffer suffices
         // for a build/test process tree and is refilled by the OS on each call.
-        private int CountProcesses()
+        internal int CountProcesses()
         {
             if (!IsValid) return -1;
             const int capacity = 1024;

@@ -4,6 +4,8 @@
     <Compile Include="../Shared/ValidationPaths.cs" Link="ValidationPaths.cs" />
     <ProjectReference Include="../../src/MiniHarness.Server/MiniHarness.Server.csproj" />
     <ProjectReference Include="../../src/MiniHarness.Coding/MiniHarness.Coding.csproj" />
+    <ProjectReference Include="../MiniHarness.ProcessFixture/MiniHarness.ProcessFixture.csproj" />
+    <None Include="../MiniHarness.ProcessFixture/bin/$(Configuration)/$(TargetFramework)/MiniHarness.ProcessFixture.runtimeconfig.json" Link="MiniHarness.ProcessFixture.runtimeconfig.json" CopyToOutputDirectory="PreserveNewest" />
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
 </Project>

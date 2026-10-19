@@ -1,0 +1,73 @@
+@base = http://127.0.0.1:5080
+@key = your-local-service-key
+@task = replace-with-task-id
+@resource = replace-with-process-resource-id
+@generation = replace-with-generation-from-process-snapshot
+
+### Requires Processes.Enabled and a host-defined worker profile.
+POST {{base}}/agent/tasks/commands?wait=false
+Content-Type: application/json
+Authorization: Bearer {{key}}
+
+{
+  "id": "process-demo-start-001",
+  "kind": "Start",
+  "request": {
+    "model": "mini-agent",
+    "messages": [{ "role": "user", "text": "Start profile worker, read its output and wait for a state change. Do not invent results." }]
+  }
+}
+
+### Inspect persisted task, current resource snapshots and active wait.
+GET {{base}}/agent/tasks/{{task}}
+Authorization: Bearer {{key}}
+
+### Output cursors are independent of task event sequence IDs. Limit is JSON bytes, minimum 256.
+GET {{base}}/agent/tasks/{{task}}/resources/{{resource}}/output?after=0&limit=8192
+Authorization: Bearer {{key}}
+
+### Agent correction: same task/turn and cumulative budget; no implicit process kill.
+POST {{base}}/agent/tasks/commands?wait=false
+Content-Type: application/json
+Authorization: Bearer {{key}}
+
+{
+  "id": "process-demo-steer-001",
+  "kind": "Steer",
+  "taskId": "{{task}}",
+  "steering": { "text": "Change direction: inspect the new result first.", "constraints": ["Do not modify source before inspecting the result."] }
+}
+
+### Process input is not an Agent instruction. Requires AllowStdin on the frozen host profile.
+POST {{base}}/agent/tasks/commands
+Content-Type: application/json
+Authorization: Bearer {{key}}
+
+{
+  "id": "process-demo-input-001",
+  "kind": "WriteResourceInput",
+  "taskId": "{{task}}",
+  "resourceId": "{{resource}}",
+  "resourceInput": { "expectedGeneration": "{{generation}}", "text": "yes\n" }
+}
+
+### Explicit EOF; repeat the same command ID and payload to obtain the same confirmed receipt.
+POST {{base}}/agent/tasks/commands
+Content-Type: application/json
+Authorization: Bearer {{key}}
+
+{ "id": "process-demo-eof-001", "kind": "WriteResourceInput", "taskId": "{{task}}", "resourceId": "{{resource}}", "resourceInput": { "expectedGeneration": "{{generation}}", "closeInput": true } }
+
+### Cancel task and propagate cancellation to owned resources. Inspect termination confirmation separately.
+POST {{base}}/agent/tasks/commands
+Content-Type: application/json
+Authorization: Bearer {{key}}
+
+{ "id": "process-demo-cancel-001", "kind": "Cancel", "taskId": "{{task}}" }
+
+### Cleanup/reconciliation remains available after a task is terminal. No PID reattach or auto-restart.
+POST {{base}}/agent/tasks/commands
+Content-Type: application/json
+Authorization: Bearer {{key}}
+
+{ "id": "process-demo-reconcile-001", "kind": "ReconcileResources", "taskId": "{{task}}" }

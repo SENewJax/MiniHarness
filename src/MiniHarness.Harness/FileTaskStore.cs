@@ -9,9 +9,11 @@ using MiniHarness.Abstractions;
 
 namespace MiniHarness.Harness
 {
-    public sealed class FileTaskStore : ITaskStore
+    public sealed class FileTaskStore : ITaskStore, ITaskCatalog
     {
         private readonly string directory;
+        public System.Collections.Generic.IEnumerable<string> EnumerateTaskIds()
+            => Directory.EnumerateFiles(directory, "task_*.json").Select(Path.GetFileNameWithoutExtension).Select(id => id!);
         // A writer lease excludes other writers, not status/event readers.
         // Windows replacement can fail while a reader still owns a handle.
         // Bounded stripes coordinate handle lifetime and publication across

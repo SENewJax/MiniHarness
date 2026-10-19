@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
@@ -21,6 +22,14 @@ namespace MiniHarness.Server
         { this.runtime = runtime; this.model = model; this.server = server; this.logger = logger; }
         public void Map(WebApplication app)
         {
+            app.MapGet("/agent/tasks/{id}/resources/{resourceId}/output", (HttpContext http, string id, string resourceId) => GuardAsync(http, async () =>
+            {
+                if (!long.TryParse(http.Request.Query["after"].FirstOrDefault() ?? "0", out var after) ||
+                    !int.TryParse(http.Request.Query["limit"].FirstOrDefault() ?? "8192", out var limit)) throw new ArgumentException("Invalid output cursor or byte limit.");
+                if (runtime is not IResourceOutputAccess access) throw new ArgumentException("Resource output is unavailable.");
+                await http.Response.WriteAsJsonAsync(await access.ReadResourceOutputAsync(id, resourceId, after, limit, http.RequestAborted),
+                    new JsonSerializerOptions(TaskJson.Options) { WriteIndented = false }, http.RequestAborted);
+            }));
             app.MapPost("/agent/tasks/commands", (HttpContext http) => GuardAsync(http, async () =>
             {
                 using var execution = new RequestExecution(server, http.RequestAborted);
