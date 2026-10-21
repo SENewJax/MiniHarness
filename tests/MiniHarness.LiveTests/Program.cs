@@ -24,6 +24,9 @@ namespace MiniHarness.LiveTests
             if (args.FirstOrDefault() == "--coding") return await ValidateCodingAsync(args.Skip(1).ToArray());
             if (args.FirstOrDefault() == "--coding-fixture") return await ValidateCodingAsync(new[] { "Offline" });
             if (args.FirstOrDefault() == "--long-running") return await ValidateLongRunningAsync(args.Skip(1).ToArray());
+            if (args.FirstOrDefault() == "--context-recovery") return await ValidateContextRecoveryAsync(args.Skip(1).ToArray());
+            if (args.FirstOrDefault() == "--resume-context") return await ResumeContextRecoveryAsync(args.Skip(1).ToArray());
+            if (args.FirstOrDefault() == "--audit-context") return await AuditContextRecoveryAsync(args.Skip(1).ToArray());
             string key = "";
             try
             {

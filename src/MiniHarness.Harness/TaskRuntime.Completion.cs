@@ -47,6 +47,7 @@ namespace MiniHarness.Harness
             {
                 if (await YieldForSteeringAsync(task, turn, lease)) return true;
                 turn.Status = TurnStatus.Completed; turn.Wait = WaitReason.None; turn.StopReason = null;
+                turn.ResponseHistoryCount ??= task.History.Count;
                 task.Status = verdict.CompleteTask ? AgentTaskStatus.Completed : AgentTaskStatus.Waiting;
                 task.Wait = verdict.CompleteTask ? WaitReason.None : WaitReason.Input;
                 Emit(task, verdict.CompleteTask ? "TaskCompleted" : "TurnCompleted", turn);
@@ -54,7 +55,7 @@ namespace MiniHarness.Harness
             }
             if (verdict.CanContinue)
             {
-                task.History.Add(new HistoryEntry { TurnId = turn.Id, Message = new Message { Role = "system", Text = verdict.Feedback } });
+                task.History.Add(new HistoryEntry { TurnId = turn.Id, Source = "runtime_feedback", Message = new Message { Role = "system", Text = verdict.Feedback } });
                 turn.Wait = WaitReason.None; Emit(task, "CompletionFeedback", turn, verdict.Feedback);
                 await CommitAsync(lease, task).ConfigureAwait(false); return false;
             }

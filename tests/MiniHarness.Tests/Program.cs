@@ -20,6 +20,10 @@ namespace MiniHarness.Tests
             var tests = new List<(string Name, Func<Task> Run)>();
             HarnessTests.Register(tests);
             ProtocolTests.Register(tests);
+            V3ContextProjectionTests.Register(tests);
+            V3CompactionTests.Register(tests);
+            V3RecoveryTests.Register(tests);
+            V3ConsistencyTests.Register(tests);
             HttpTests.Register(tests);
             TaskStageTests.Register(tests);
             ConsistencyTests.Register(tests);
@@ -33,7 +37,7 @@ namespace MiniHarness.Tests
             string stage = args.Length == 2 && args[0] == "--stage" ? args[1] : "all";
             if (args.Length != 0 && (args.Length != 2 || args[0] != "--stage"))
             {
-                Console.WriteLine("Usage: --stage all|legacy|1|2|3|4-5|6|v0-control|v0-replan|v0-resource|v0-child|v0-storage|v1-workspace|v1-mutation|v1-ledger|v1-tool|v1-process|v1-verify|v1-policy|v1-e2e|consistency|v2-session|v2-output|v2-resource|v2-wait|v2-steer|v2-recovery|v2-consistency"); return 2;
+                Console.WriteLine("Usage: --stage all|legacy|1|2|3|4-5|6|v0-control|v0-replan|v0-resource|v0-child|v0-storage|v1-workspace|v1-mutation|v1-ledger|v1-tool|v1-process|v1-verify|v1-policy|v1-e2e|consistency|v2-session|v2-output|v2-resource|v2-wait|v2-steer|v2-recovery|v2-consistency|v3-context|v3-compact|v3-budget|v3-recovery|v3-migration|v3-consistency"); return 2;
             }
             tests = tests.FindAll(t => stage == "all" || (stage == "legacy" ? !t.Name.StartsWith("[", StringComparison.Ordinal)
                 : t.Name.StartsWith("[" + stage + "]", StringComparison.Ordinal)));

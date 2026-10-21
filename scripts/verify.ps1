@@ -1,4 +1,4 @@
-param([string]$DotnetPath = 'dotnet', [ValidateSet('all','legacy','1','2','3','4-5','6','7','v0-control','v0-replan','v0-resource','v0-child','v0-storage','v1-tool','v1-workspace','v1-mutation','v1-ledger','v1-process','v1-verify','v1-policy','v1-e2e','consistency','v2-session','v2-output','v2-resource','v2-wait','v2-steer','v2-recovery','v2-consistency')][string]$Stage = 'all')
+param([string]$DotnetPath = 'dotnet', [ValidateSet('all','legacy','1','2','3','4-5','6','7','v0-control','v0-replan','v0-resource','v0-child','v0-storage','v1-tool','v1-workspace','v1-mutation','v1-ledger','v1-process','v1-verify','v1-policy','v1-e2e','consistency','v2-session','v2-output','v2-resource','v2-wait','v2-steer','v2-recovery','v2-consistency','v3-context','v3-compact','v3-budget','v3-recovery','v3-migration','v3-consistency')][string]$Stage = 'all')
 $ErrorActionPreference = 'Stop'
 $workspace = Split-Path -Parent $PSScriptRoot
 Push-Location -LiteralPath $workspace

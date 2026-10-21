@@ -80,6 +80,7 @@ namespace MiniHarness.Harness
                 operation.Status = OperationStatus.Started; task.Budget.ToolCalls++; turn.ToolCalls++;
                 Emit(task, "OperationStarted", turn, operation.Call.Name, operation);
                 await CommitAsync(lease, task).ConfigureAwait(false);
+                FaultInjection?.Invoke("operation_started");
                 var outcome = admission.Allowed ? await executor.ExecuteAsync(tool!, TaskJson.Clone(operation.Call), context, ct).ConfigureAwait(false)
                     : new ToolOutcome { Status = ToolCallStatus.Rejected, Output = admission.Reason, Effect = EffectState.None };
                 if (outcome.WaitRequest != null)
@@ -99,9 +100,10 @@ namespace MiniHarness.Harness
                 }
                 FinishOperation(task, turn, operation, outcome);
                 await CommitAsync(lease, task).ConfigureAwait(false);
+                FaultInjection?.Invoke("operation_committed");
             }
             if (task.ResourceWaits.Any(w => w.TurnId == turn.Id && w.Status == "active"))
-            { Wait(task, turn, WaitReason.Resource, "resource_wait"); await CommitAsync(lease, task); return false; }
+            { Wait(task, turn, WaitReason.Resource, "resource_wait"); await CommitAsync(lease, task); FaultInjection?.Invoke("resource_wait_saved"); return false; }
             if (pending.Count > 0) turn.Settings.Options.ToolChoice = "auto";
             return true;
         }

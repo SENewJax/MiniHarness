@@ -2,10 +2,13 @@
   <PropertyGroup><OutputType>Exe</OutputType></PropertyGroup>
   <ItemGroup>
     <Compile Include="../Shared/ValidationPaths.cs" Link="ValidationPaths.cs" />
+    <Compile Include="../Shared/RecoveryHost.cs" Link="RecoveryHost.cs" />
     <ProjectReference Include="../../src/MiniHarness.Model.OpenAI/MiniHarness.Model.OpenAI.csproj" />
     <ProjectReference Include="../../src/MiniHarness.Harness/MiniHarness.Harness.csproj" />
     <ProjectReference Include="../../src/MiniHarness.Server/MiniHarness.Server.csproj" />
     <ProjectReference Include="../MiniHarness.ProcessFixture/MiniHarness.ProcessFixture.csproj" />
+    <ProjectReference Include="../MiniHarness.RecoveryFixture/MiniHarness.RecoveryFixture.csproj" />
+    <None Include="../MiniHarness.RecoveryFixture/bin/$(Configuration)/$(TargetFramework)/MiniHarness.RecoveryFixture.runtimeconfig.json" Link="MiniHarness.RecoveryFixture.runtimeconfig.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../MiniHarness.ProcessFixture/bin/$(Configuration)/$(TargetFramework)/MiniHarness.ProcessFixture.runtimeconfig.json" Link="MiniHarness.ProcessFixture.runtimeconfig.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

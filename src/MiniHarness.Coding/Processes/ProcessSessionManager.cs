@@ -11,7 +11,7 @@ using MiniHarness.Abstractions;
 
 namespace MiniHarness.Coding.Processes
 {
-    public sealed class ProcessSessionManager : IInteractiveResourceManager, IResourceInputJournal, IResourceWaitPolicy, IAsyncDisposable
+    public sealed class ProcessSessionManager : IInteractiveResourceManager, IResourceInputJournal, IResourceWaitPolicy, IResourceIntentLookup, IResourceReconciler, IAsyncDisposable
     {
         public string Kind => "process";
         public string Generation { get; } = Guid.NewGuid().ToString("N");
@@ -43,12 +43,37 @@ namespace MiniHarness.Coding.Processes
         public IReadOnlyList<string> ProfileNames => profiles.Keys.ToList();
         private string PathFor(string id) => Path.Combine(options.Directory, id + ".json");
         private string OutputPath(string id) => Path.Combine(options.Directory, id + ".output.json");
+        private static string SessionId(string taskId, string operationId) => "process_" + WorkspaceAccess.HashBytes(Encoding.UTF8.GetBytes(taskId + ":" + operationId)).Substring(0, 32);
+        public Task<ResourceReference?> FindIntentAsync(string taskId, string operationId, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested(); string id = SessionId(taskId, operationId);
+            return Task.FromResult<ResourceReference?>(sessions.ContainsKey(id) || File.Exists(PathFor(id)) ? Load(id, taskId) : null);
+        }
+        public async Task<ResourceReference> ReconcileAsync(ResourceReference resource, ResourceReconciliation observation, CancellationToken ct)
+        {
+            await admission.WaitAsync(ct);
+            try
+            {
+                var current = Load(resource.Id, resource.OwnerTaskId); CheckIdentity(resource, current);
+                if (ownership == null || sessions.ContainsKey(resource.Id)) throw new ResourceRequestRejectedException("A live or foreign host session cannot be overridden; query/cancel it through its owner.");
+                if (!observation.TerminationConfirmed || !ResourceStates.IsTerminal(observation.State) ||
+                    observation.ExpectedGeneration != current.Process!.Generation || string.IsNullOrWhiteSpace(observation.Basis) || observation.Basis.Length > 4096)
+                    throw new ResourceRequestRejectedException("Trusted termination observation, generation and basis are required.");
+                var record = ProcessJson.Read<SessionRecord>(PathFor(resource.Id));
+                record.Resource.State = observation.State; record.Resource.Process!.TerminationConfirmed = true;
+                record.Resource.Process.ExitCode = observation.ExitCode; record.Resource.Process.OutputDegraded = true;
+                record.Resource.Process.OutputArtifact = null; record.Resource.Process.Version++;
+                record.Resource.Result = "Trusted external observation: " + observation.Basis;
+                ProcessJson.Write(PathFor(resource.Id), record); return ProcessJson.Clone(record.Resource);
+            }
+            finally { admission.Release(); }
+        }
         public async Task<ResourceReference> StartAsync(string profile, ToolExecutionContext context, CancellationToken ct)
         {
             new WorkspaceAccess(context.Workspace).RequireGrant(WorkspaceGrants.Execute);
             if (!profiles.TryGetValue(profile, out var template)) throw new ResourceRequestRejectedException("Unknown process profile.");
             string root = new WorkspaceAccess(context.Workspace).Root;
-            string id = "process_" + WorkspaceAccess.HashBytes(Encoding.UTF8.GetBytes(context.TaskId + ":" + context.OperationId)).Substring(0, 32);
+            string id = SessionId(context.TaskId, context.OperationId);
             await admission.WaitAsync(ct).ConfigureAwait(false);
             try
             {

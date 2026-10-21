@@ -1,0 +1,61 @@
+@base = http://127.0.0.1:5080
+@key = your-local-service-key
+@task = replace-with-task-id
+@token = replace-with-recovery-continuation-token
+@history = replace-with-history-entry-id
+
+### Classify/normalize only: no business model or tools are executed.
+POST {{base}}/agent/tasks/commands
+Authorization: Bearer {{key}}
+Content-Type: application/json
+
+{ "id": "recover-001", "kind": "Recover", "taskId": "{{task}}" }
+
+### Read the classification and logical continuation token.
+GET {{base}}/agent/tasks/{{task}}/recovery
+Authorization: Bearer {{key}}
+
+### Continue exactly the inspected point; an obsolete token cannot advance again.
+POST {{base}}/agent/tasks/commands?wait=false
+Authorization: Bearer {{key}}
+Content-Type: application/json
+
+{ "id": "resume-001", "kind": "Resume", "taskId": "{{task}}", "recoveryToken": "{{token}}" }
+
+### Requires Context.Enabled and a settled waiting/paused boundary; costs are charged.
+POST {{base}}/agent/tasks/commands
+Authorization: Bearer {{key}}
+Content-Type: application/json
+
+{ "id": "compact-001", "kind": "CompactContext", "taskId": "{{task}}" }
+
+### Inspect current memory/coverage without changing it.
+GET {{base}}/agent/tasks/{{task}}/context
+Authorization: Bearer {{key}}
+
+### Original audit history, independent of the model projection.
+GET {{base}}/agent/tasks/{{task}}/history?limit=65536
+Authorization: Bearer {{key}}
+
+### Bounded single-entry JSON fragment. Join Data using NextOffset, then verify ContentHash.
+GET {{base}}/agent/tasks/{{task}}/history/{{history}}?offset=0&limit=1024
+Authorization: Bearer {{key}}
+
+### Host must explicitly authorize trusted usage reconciliation; do not guess usage.
+POST {{base}}/agent/tasks/commands
+Authorization: Bearer {{key}}
+Content-Type: application/json
+
+{
+  "id": "usage-001", "kind": "ReconcileModelUsage", "taskId": "{{task}}",
+  "modelUsage": {
+    "invocationId": "replace-with-unknown-invocation-id",
+    "usage": { "inputTokens": 100, "outputTokens": 20, "known": true },
+    "basis": "replace-with-trusted-provider-receipt-or-host-approved-bound",
+    "conservativeUpperBound": false
+  }
+}
+
+### Observe background failures; acceptance is not proof of completion.
+GET {{base}}/agent/tasks/{{task}}/failure
+Authorization: Bearer {{key}}

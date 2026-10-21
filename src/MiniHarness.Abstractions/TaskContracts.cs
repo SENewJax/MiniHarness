@@ -75,10 +75,14 @@ namespace MiniHarness.Abstractions
         public TaskFacts Facts { get; set; } = new TaskFacts();
         public TaskStep Step { get; set; } = new TaskStep();
         public List<HistoryEntry> History { get; set; } = new List<HistoryEntry>();
+        public ContextMemory Memory { get; set; } = new ContextMemory();
+        public SummaryContent? Summary { get; set; }
+        public string RuntimeState { get; set; } = "";
     }
     public sealed class PreparedContext
     {
         public List<Message> Messages { get; set; } = new List<Message>();
+        public string SourceHash { get; set; } = "";
     }
     public interface IContextPreparation
     {

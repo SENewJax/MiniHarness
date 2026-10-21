@@ -44,6 +44,7 @@ namespace MiniHarness.Server
                         {
                             var task = await application.GetAsync(id, stop);
                             if (task == null || task.Status == AgentTaskStatus.Running) continue;
+                            if (task.Recovery.HostGeneration != runtime.HostGeneration) continue;
                             if (!task.ResourceWaits.Any(w => w.Status == "active"))
                             {
                                 foreach (var owned in task.Resources.Where(r => r.Kind == manager.Kind))
@@ -60,6 +61,7 @@ namespace MiniHarness.Server
                                 }
                             }
                             if (task.Status == AgentTaskStatus.Cancelled || task.Status == AgentTaskStatus.Completed || task.Status == AgentTaskStatus.Failed) continue;
+                            if ((!task.Recovery.CanWake || !task.Recovery.AutomaticAllowed) && task.Status != AgentTaskStatus.Paused) continue;
                             foreach (var wait in task.ResourceWaits.Where(w => w.Status == "active"))
                             {
                                 var resource = task.Resources.Single(r => r.Id == wait.Request.ResourceId);
@@ -70,7 +72,7 @@ namespace MiniHarness.Server
                                 // Observe failures without blocking other tasks on a full
                                 // model turn; submission returns after durable acceptance.
                                 Dispatch(new TaskCommand { Id = TaskJson.Hash(wait.Id + ":" + current.Process!.Version + ":" + expired),
-                                    Kind = TaskCommandKind.ResourceWake, TaskId = task.Id, Wake = new ResourceWake { WaitId = wait.Id } }, stop);
+                                    Kind = TaskCommandKind.ResourceWake, TaskId = task.Id, Automatic = true, Wake = new ResourceWake { WaitId = wait.Id } }, stop);
                             }
                         }
                         catch (OperationCanceledException) when (stop.IsCancellationRequested) { break; }

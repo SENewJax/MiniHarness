@@ -31,11 +31,20 @@ namespace MiniHarness.Model.OpenAI
     }
 
     // Transport/retry logic is shared; adapters differ only by the wire protocol.
-    public abstract class OpenAiModelProvider : IModelProvider, IModelRequestSizer
+    public abstract class OpenAiModelProvider : IModelProvider, IModelRequestSizer, IModelContinuationPolicy
     {
         private readonly HttpClient client;
         private readonly ModelOptions options;
         private readonly IOpenAiProtocol protocol;
+        public bool CanCompactClosedMessage(Message message)
+        {
+            foreach (var item in message.ProviderItems)
+            {
+                if (options.Protocol != "Responses" || !item.TryGetProperty("type", out var type) ||
+                    (type.GetString() != "message" && type.GetString() != "reasoning" && type.GetString() != "function_call")) return false;
+            }
+            return true;
+        }
 
         protected OpenAiModelProvider(HttpClient client, ModelOptions options, IOpenAiProtocol protocol)
         {
@@ -45,6 +54,7 @@ namespace MiniHarness.Model.OpenAI
         public async Task<ModelResponse> GenerateAsync(ModelRequest request, CancellationToken cancellationToken)
         {
             var body = protocol.WriteRequest(request).ToJsonString();
+            int retries = request.InvocationPurpose == ModelInvocationPurpose.Summary ? 0 : options.MaxRetries;
             var endpoint = new Uri(new Uri(options.BaseUrl.TrimEnd('/') + "/"), protocol.Path);
             for (int attempt = 0; ; attempt++)
             {
@@ -60,7 +70,7 @@ namespace MiniHarness.Model.OpenAI
                     if (!response.IsSuccessStatusCode)
                     {
                         bool transient = response.StatusCode == HttpStatusCode.TooManyRequests || (int)response.StatusCode >= 500;
-                        if (transient && attempt < options.MaxRetries)
+                        if (transient && attempt < retries)
                         {
                             await Task.Delay(RetryDelay(response, attempt), cancellationToken).ConfigureAwait(false);
                             continue;
@@ -78,7 +88,7 @@ namespace MiniHarness.Model.OpenAI
                 }
                 catch (HttpRequestException ex)
                 {
-                    if (attempt >= options.MaxRetries) throw new ModelException("Upstream model connection failed.", ex);
+                    if (attempt >= retries) throw new ModelException("Upstream model connection failed.", ex);
                     await Task.Delay(TimeSpan.FromMilliseconds(200 * Math.Pow(2, attempt)), cancellationToken).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)

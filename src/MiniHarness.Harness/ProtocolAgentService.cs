@@ -47,7 +47,10 @@ namespace MiniHarness.Harness
             if (reference == null) return null;
             var task = await store.LoadAsync(reference.TaskId, cancellationToken).ConfigureAwait(false);
             var turn = task?.Turns.SingleOrDefault(t => t.Id == reference.TurnId);
-            return turn == null || !turn.Settings.StoreResponse ? null : TaskProjection.ToRun(task!, turn);
+            if (turn == null || !turn.Settings.StoreResponse) return null;
+            var response = TaskProjection.ToRun(task!, turn);
+            if (turn.Status == TurnStatus.Completed) response.Status = RunStatus.Completed;
+            return response;
         }
     }
 }

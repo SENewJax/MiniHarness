@@ -23,8 +23,9 @@ namespace MiniHarness.Server
         {
             Build(args).Run();
         }
+        public static WebApplication Build(string[] args, Action<WebApplicationBuilder>? configure) => Build(args, configure, null);
 
-        public static WebApplication Build(string[] args, Action<WebApplicationBuilder>? configure = null)
+        public static WebApplication Build(string[] args, Action<WebApplicationBuilder>? configure = null, Action<IServiceCollection>? configureServices = null)
         {
             // One composition root and one configuration file for all implementations.
             var builder = WebApplication.CreateBuilder(new WebApplicationOptions
@@ -41,6 +42,9 @@ namespace MiniHarness.Server
             var toolOptions = builder.Configuration.GetSection("Tools").Get<ToolsOptions>() ?? new ToolsOptions();
             var codingOptions = builder.Configuration.GetSection("Coding").Get<CodingOptions>() ?? new CodingOptions();
             var processOptions = builder.Configuration.GetSection("Processes").Get<ProcessServerOptions>() ?? new ProcessServerOptions();
+            var contextOptions = builder.Configuration.GetSection("Context").Get<ContextOptions>() ?? new ContextOptions(); contextOptions.Validate();
+            var recoveryOptions = builder.Configuration.GetSection("Recovery").Get<RecoveryServerOptions>() ?? new RecoveryServerOptions(); recoveryOptions.Policy().Validate();
+            builder.Services.AddSingleton(contextOptions); builder.Services.AddSingleton(recoveryOptions);
             builder.Services.AddSingleton(processOptions);
             server.Validate(); model.Validate(); harness.Validate();
             builder.WebHost.ConfigureKestrel(k => k.Limits.MaxRequestBodySize = server.MaxRequestBodyBytes);
@@ -48,7 +52,7 @@ namespace MiniHarness.Server
             builder.Services.AddSingleton(model);
             builder.Services.AddSingleton(harness);
             builder.Services.AddSingleton<ITaskStore>(new FileTaskStore(Path.IsPathRooted(storage.Directory)
-                ? storage.Directory : Path.Combine(builder.Environment.ContentRootPath, storage.Directory)));
+                ? storage.Directory : Path.Combine(builder.Environment.ContentRootPath, storage.Directory), contextOptions.MaxCheckpointBytes));
             var binding = new ModelBinding
             {
                 Model = model.Model, Protocol = model.Protocol,
@@ -117,19 +121,24 @@ namespace MiniHarness.Server
                 toolPolicy: services.GetRequiredService<IToolPolicy>(), executor: services.GetRequiredService<IToolExecutor>(),
                 completion: taskCompletion, workspaceRevision: revisionProvider,
                 resourceManagers: services.GetServices<IResourceManager>(), executionFailed: (id, error) =>
-                    services.GetRequiredService<ILogger<TaskRuntime>>().LogError(error, "Task {TaskId} execution failed after acceptance.", id)));
+                    services.GetRequiredService<ILogger<TaskRuntime>>().LogError(error, "Task {TaskId} execution failed after acceptance.", id),
+                contextOptions: contextOptions, recoveryOptions: recoveryOptions.Policy(), recoveryAuthorizer: services.GetRequiredService<IRecoveryAuthorizer>()));
             builder.Services.AddSingleton<ITaskInitializer, HostTaskInitializer>();
+            builder.Services.AddSingleton<IRecoveryAuthorizer, HostRecoveryAuthorizer>();
             builder.Services.AddSingleton<TaskApplicationService>(services => new TaskApplicationService(
                 services.GetRequiredService<TaskRuntime>(), services.GetRequiredService<ITaskInitializer>()));
             builder.Services.AddSingleton<ITaskApplicationService>(services => services.GetRequiredService<TaskApplicationService>());
             builder.Services.AddSingleton<ITaskRuntime>(services => services.GetRequiredService<ITaskApplicationService>());
             builder.Services.AddSingleton<IResourceOutputAccess>(services => services.GetRequiredService<TaskApplicationService>());
+            builder.Services.AddSingleton<TaskRecoveryService>();
+            builder.Services.AddHostedService(services => services.GetRequiredService<TaskRecoveryService>());
             builder.Services.AddSingleton<ProtocolAgentService>();
             builder.Services.AddSingleton<IAgentService>(services => services.GetRequiredService<ProtocolAgentService>());
             builder.Services.AddSingleton<IAgentRunner>(services => services.GetRequiredService<ProtocolAgentService>());
             builder.Services.AddSingleton<AgentApi>();
             builder.Services.AddSingleton(coding != null ? new CodingTaskSetup(coding) : new CodingTaskSetup());
             builder.Services.AddSingleton<TaskApi>();
+            configureServices?.Invoke(builder.Services);
             var app = builder.Build();
             app.Services.GetRequiredService<AgentApi>().Map(app);
             app.Services.GetRequiredService<TaskApi>().Map(app);

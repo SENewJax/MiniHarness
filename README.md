@@ -1,164 +1,138 @@
 # MiniHarness
 
-一个使用 **C# / .NET 9** 实现的最小 Agent Harness，探索如何在模型之外建立可控制、可恢复、可验证的任务运行框架。
+**基于 C# / .NET 9 的持久任务 Agent Harness。**
 
-> Agent = Model + Harness。模型提出行动，Harness 决定是否执行，并把真实结果反馈给模型。
+MiniHarness 将模型、工具和外部进程接入同一个任务运行内核，提供执行控制、状态记录与证据驱动的完成判定。面向希望理解和构建 Coding Agent 的开发者，也可作为实现自定义 Harness 的参考。
 
-当前项目以 **V0 运行框架**为基线，并已在此内核上落地 **V1 编码闭环**：Agent 可以在受控工作区内定位、读取、修改代码，运行宿主预定义的构建与测试，并依据真实退出码证据决定是否完成；测试失败后可以继续修正。V0 仍提供统一的任务状态、操作记录、审批、事件、恢复与预算机制。
+本文介绍 V0～V3 的能力与使用边界。V3 在 V2 基线上增强上下文与宿主恢复，继续使用同一任务运行内核。
 
-**V2 长时间运行能力已接入同一框架**：受控后台进程、增量输出、stdin、持久等待、自动唤醒和中途纠正，不另建 Agent 循环。实现范围、实际证据及协议阻塞见 [V2 实现与验收](references/V2-长时间运行实现与验收.md)。
+> Agent = Model + Harness。模型选择行动，Harness 约束执行并记录真实结果。
 
-## 项目目标
+[架构总览](docs/design/architecture.md) · [运行内核](docs/design/v0-runtime.md) · [编码闭环](docs/design/v1-coding.md) · [长任务与进程](docs/design/v2-processes.md)
 
-让 Agent 的运行行为由程序明确约束，而不是完全依赖提示词和模型自觉：
+## 核心能力
 
-- 模型接入与任务运行分离，更换模型或协议不需要重写运行内核。
-- 一个任务可以跨多轮输入、等待和恢复，保持身份、历史与累计预算。
-- 工具执行受权限、审批和预算控制，执行结果有记录，不确定的副作用需要核实。
-- 任务是否完成可以依据真实证据判断，而不只依据模型的一句“已完成”。
+| 能力 | 内容 |
+| --- | --- |
+| 持久任务 | 跨轮输入、累计预算、审批、暂停、取消、命令去重与检查点 |
+| 编码闭环 | 工作区内定位和读取、带版本前置条件的编辑、变更账本、构建/测试证据 |
+| 长时间运行 | 受控后台进程、增量输出、stdin、持久等待、自动唤醒与中途纠正 |
+| 上下文与恢复 | 完整交互分组、自动/显式摘要、模型输入重建、重启分类与受控继续，保留原历史和累计成本 |
+| 协议接入 | Chat Completions、Responses 与原生任务 API；对外协议和上游协议独立选择 |
 
-V0 的目标是把这些运行边界建立起来。后续允许修改核心代码，但应沿既有职责与契约增强能力，避免每次迭代都推倒框架。
+模型调用、工具执行、资源管理和完成判定共享任务身份与控制规则。Coding 和 Processes 能力由宿主显式开启；程序执行范围由工作区授权和命令 profile 决定。
 
-## 设计理念
+Context 自动摘要默认关闭；Recovery 默认只分类，不自动花费模型额度。摘要与业务推理共用预算，未知费用和副作用必须核对，摘要不能替代权限或验证证据。
 
-### Model 与 Harness 各司其职
+## 架构
 
-Model 负责理解上下文、生成回答和提出工具调用。Harness 负责运行生命周期、执行控制、状态记录与完成判定。协议转换和 HTTP 服务处于外围，不承担任务状态机的职责。
-
-### 所有入口共用运行内核
-
-Responses、Chat Completions 和原生任务接口先经过共用应用服务，统一初始化工作区、授权与验收要求，并处理等待和取消意图，再进入同一运行内核。对外协议与上游模型协议可以独立选择。
-
-```text
-调用方 → 协议与任务接口 → 共用应用服务 → Harness ↔ Model
-                          初始化与生命周期       ↓
-                                          工具、状态与证据
+```mermaid
+flowchart LR
+    API[协议接口 / 原生任务 API] --> APP[统一应用服务]
+    APP --> CORE[TaskRuntime]
+    CORE <--> MODEL[模型适配器]
+    CORE --> TOOLS[策略与工具执行]
+    TOOLS --> CODING[文件编辑 / 验证]
+    TOOLS --> PROCESS[进程会话]
+    CORE --> RESOURCE[资源管理]
+    RESOURCE --> PROCESS
+    CORE --> STORE[状态 / 历史 / 证据]
 ```
 
-### 先记录，再行动；不确定就核实
+- **一个执行内核**：所有任务入口共享初始化、预算、状态转换和完成规则。
+- **先记录，再行动**：副作用开始前保存意图；结果未知时进入核实，避免盲目重放。
+- **寿命与连接分离**：任务和进程不依赖某一次 HTTP 连接存活。
+- **完成需要依据**：配置了验证要求的任务，必须具有当前工作区版本的通过证据；活资源也需要确认收尾。
 
-产生副作用之前先记录执行意图。恢复时不盲目重放结果未知的操作。工作区或能力发生变化后，旧行动需要重新规划，旧审批不能自动授权新行动。
-
-### 能力实现与架构职责分离
-
-模型、工具、存储、上下文准备和完成策略各自可替换。共享控制规则集中维护，避免相似逻辑散落在不同入口。资源与子任务先打通最小契约，再逐步加入真实执行能力。
-
-## 当前实现
-
-| 方面 | 当前能力 |
-| --- | --- |
-| 模型接入 | 支持 Responses 与 Chat Completions 两种上游协议 |
-| 对外服务 | 提供两种 OpenAI 风格接口，以及原生任务控制与事件接口 |
-| 工具闭环 | 模型提出调用，程序校验和执行，再把实际结果反馈给模型 |
-| 持久任务 | 支持跨轮输入、累计预算、暂停、取消、审批等待和有限恢复 |
-| 执行控制 | 工具权限、审批、工具选择约束、调用次数、用量及容量限制 |
-| 安全继续 | 重复命令不重复产生作用；能力或工作区变化后重新规划 |
-| 状态与事件 | 文件检查点、运行历史、进度事件与重载 |
-| 上下文准备 | 支持异步准备与取消；当前默认透传，不生成摘要 |
-| 完成判定 | 可要求与当前工作区匹配的外部证据 |
-| 资源生命周期 | Windows 真实进程会话、全树取消确认、寿命与配额、停机收尾和旧宿主保守对账 |
-| 长任务交互 | 有界双流输出与独立游标、受控 stdin、等待释放执行权、自动唤醒、当前轮次 Steer |
-| 父子任务 | 创建、权限继承、预算预留与结算、结果回传和取消传播已验证 |
-| 工作区访问 | 统一路径规范化与边界、链接拒绝、读写执行授权、大小/二进制/编码约束 |
-| 代码定位 | `list_files`、`search_text`、`read_file`，读取返回内容哈希与截断标记 |
-| 代码修改 | `create_file`、带哈希前置条件与唯一匹配的 `apply_patch`、只计 Agent 改动的 `get_changes` |
-| 受控验证 | 一次性进程执行器与 `run_verification`，per-tool 超时、前后指纹、真实退出码、零测试防护、整棵进程树回收与日志证据 |
-| 编码完成策略 | 证据缺失或过期且预算允许时回填缺口让模型继续，版本匹配的通过证据才能完成 |
-| 入口一致性 | 协议与原生入口经同一应用服务初始化工作区、授权与必需证据，统一等待超时、取消意图与按真实 wire 视图计量容量 |
-| 检查点并发 | 写者租约外，另有固定数量的进程内文件门闩协调多实例读取句柄与原子替换；持久化失败即停止，不重放副作用 |
-
-内置 `echo`、`add`、`utc_time` 三个示例工具，用来验证 V0 闭环；编码场景另提供工作区、修改与验证工具。调用方提供的函数工具由调用方执行。编码工具默认不启用，由 `Coding` 配置开启。
-
-默认情况下，一次自然回答只完成当前轮次，任务继续等待输入。配置证据要求后，任务完成还需满足相应验收条件；完整任务完成还要求后台资源已确认收尾。进程工具默认关闭，由宿主配置允许的 profile 后开启。
-
-## 当前边界
-
-- **编码闭环有明确范围**：支持列举、字面量搜索、按范围读取、创建与唯一匹配补丁，以及宿主预定义的构建/测试；不含语义检索、复杂重命名、二进制编辑、删除文件、自动提交/PR、PTY 或完整交互终端，也不是操作系统级沙箱（运行范围限定受信任项目）。
-- **恢复有明确范围**：可以继续已保存的任务；结果未知的操作必须先核实，不能直接重跑。
-- **上下文管理尚未完整**：容量超限会受控停止，尚无自动摘要、检索或历史重建。
-- **长进程有平台与恢复边界**：当前要求 Windows Job 所有权；不提供 PTY、任意 shell 或跨宿主重启无缝接管。子任务仍是薄实现，没有自动任务分解或多 Agent 调度。
-- **证据来源有明确范围**：构建与测试工具可以产生真实退出码证据；其他业务验收仍需宿主提供。
-- **协议支持文本与函数调用子集**：不是完整的 OpenAI 服务；模型输出 SSE 为缓冲式，原生任务进度另有事件接口。
-- **部署面向单进程、共享信任域**：使用文件存储，尚无多租户隔离或分布式调度。
-
-Responses 的历史续接会创建独立分支任务；需要保持同一任务和连续预算时，使用原生任务接口。
-
-## 演进方向
-
-| 阶段 | 目标 |
-| --- | --- |
-| V0：运行框架（已落地） | 建立统一内核，验证控制、持久化、恢复及扩展契约 |
-| V1：编码闭环（已落地） | 搜索、读取、修改代码并运行测试，完成一次可验证的修复 |
-| V2：长时间运行（已实现，严格验收待补） | 管理长进程、持续输出、等待与中途输入 |
-| V3：上下文与恢复 | 自动摘要、上下文重建和更完整的任务恢复 |
-| V4：可验收交付 | 将需求、版本、产物与真实验收证据关联 |
-| V5：扩展协作 | 接入 MCP、技能和多 Agent 协作 |
-
-这些阶段是能力演进方向。当前提前验证的资源和父子任务契约，不代表对应阶段已经完成。
+详细职责、状态模型和设计取舍见[架构总览](docs/design/architecture.md)。
 
 ## 快速开始
 
-需要 **.NET 9 SDK**。项目使用 C# 10 常规语法，没有第三方 NuGet 依赖。使用 Visual Studio 时，建议采用与仓库指定 SDK 匹配的 VS 2022 17.14。
+需要 [.NET 9 SDK](global.json)。项目使用 C# 10，无第三方 NuGet 包依赖。后台进程能力要求 Windows Job 支持。
 
-1. 在 [统一配置文件](src/MiniHarness.Server/appsettings.json) 中设置模型地址、密钥、模型名和上游协议。
-2. 也可以保留模型默认空配置，使用 `CODING_PLAN_URL`、`CODING_PLAN_APIKEY`、`CODING_PLAN_MODEL` 环境变量提供接入信息；上游协议仍由配置文件选择。
-3. 在仓库根目录执行：
+在仓库根目录设置上游模型配置，将占位符替换为实际值：
 
 ```powershell
+$env:Model__BaseUrl = "https://your-provider.example/v1"
+$env:Model__ApiKey = "<API_KEY>"
+$env:Model__Model = "<MODEL_ID>"
+$env:Model__Protocol = "ChatCompletions" # 或 Responses
+
 dotnet build MiniHarness.sln
-dotnet run --project src/MiniHarness.Server
+dotnet run --project src/MiniHarness.Server --no-launch-profile -- --urls http://127.0.0.1:5080
 ```
 
-默认地址为 `http://127.0.0.1:5080`，对外模型名称为 `mini-agent`。服务访问密钥、运行预算、工具权限和存储位置也在同一配置文件中设置。
-
-请求示例：
-
-- [Responses 与 Chat Completions](examples/requests.http)
-- [任务控制、资源与子任务](examples/task-commands.http)
-- [V2 后台进程与中途控制](examples/process-tasks.http)
-
-## 验证
-
-运行构建与全量离线验证：
+`--no-launch-profile` 避免本地开发 profile 覆盖监听地址。服务启动后，在另一终端发送请求：
 
 ```powershell
+$body = @{
+    model = "mini-agent"
+    messages = @(@{ role = "user"; content = "请简要说明你可以协助什么。" })
+} | ConvertTo-Json -Depth 4
+
+Invoke-RestMethod -Uri "http://127.0.0.1:5080/v1/chat/completions" `
+    -Method Post -ContentType "application/json; charset=utf-8" `
+    -Body ([Text.Encoding]::UTF8.GetBytes($body))
+```
+
+`mini-agent` 是对外服务模型别名，与上游 `Model:Model` 分开配置。上述请求适用于未设置服务访问密钥的本地配置；若设置了 `Server:ApiKey`，请求需携带对应 Bearer token。
+
+## 配置与接口
+
+统一配置见 [appsettings.json](src/MiniHarness.Server/appsettings.json)。环境变量使用双下划线表示配置层级，例如 `Server__WorkspaceRoot`。
+
+| 配置节 | 作用 |
+| --- | --- |
+| `Model` | 上游地址、密钥、模型、协议和传输限制 |
+| `Server` | 对外别名、访问密钥、请求期限、工作区与断连取消策略 |
+| `Harness` | 模型/工具调用预算、累计用量、上下文与输出限制 |
+| `Storage` | 任务检查点位置 |
+| `Coding` | 编码工具开关、授权、验证 profile 与必需证据 |
+| `Processes` | 后台进程开关、宿主 profile、输入输出及生命周期限制 |
+| `Context` | 自动摘要、近期原文、尺寸与调用上限、检查点和历史查询限制 |
+| `Recovery` | Manual/Safe 恢复、并发与重试限制、可信核对授权 |
+
+模型配置未显式设置时，也可整组提供 `CODING_PLAN_URL`、`CODING_PLAN_APIKEY`、`CODING_PLAN_MODEL`；上游协议仍由 `Model:Protocol` 选择。相对存储路径按服务内容根目录解析，需要固定位置时使用绝对路径。
+
+编码任务需设置 `Server:WorkspaceRoot` 并开启 `Coding:Enabled`。需要测试门禁时，同时声明验证 profile 和 `Coding:RequiredVerification`。后台进程另行开启 `Processes:Enabled` 并声明 profile，其状态目录需位于源码工作区外。
+
+| API | 用途 | 示例 |
+| --- | --- | --- |
+| `/v1/chat/completions`、`/v1/responses` | 文本与函数调用协议入口 | [协议请求](examples/requests.http) |
+| `/agent/tasks/commands` | 持久提交、继续、审批、取消与纠正 | [任务命令](examples/task-commands.http) |
+| `/agent/tasks/{id}`、`/agent/tasks/{id}/events` | 查询任务与观察进度 | [任务命令](examples/task-commands.http) |
+| `/agent/tasks/{id}/resources/{resourceId}/output` | 按游标读取进程输出 | [进程交互](examples/process-tasks.http) |
+| `/agent/tasks/{id}/recovery`、`context`、`history`、`failure` | 只读恢复、上下文、原历史和后台停止诊断 | [V3 请求](examples/context-recovery.http) |
+
+需要保持同一任务和累计预算时使用原生任务 API。Responses 的 `previous_response_id` 表示历史分支，不等同于继续原任务。
+
+## 设计文档
+
+| 文档 | 重点 |
+| --- | --- |
+| [架构总览](docs/design/architecture.md) | 模块依赖、数据权威性、执行路由与演进原则 |
+| [V0：持久任务运行内核](docs/design/v0-runtime.md) | Task/Turn/Step/Operation、状态转换、审批、幂等与故障语义 |
+| [V1：受控修改与版本化证据](docs/design/v1-coding.md) | 工作区边界、编辑前置条件、变更归属和证据完成策略 |
+| [V2：长任务与进程生命周期](docs/design/v2-processes.md) | 资源所有权、持久等待、输入输出、纠正与取消 |
+| [V3：上下文与恢复](docs/design/v3-context-recovery.md) | 模型投影、摘要权威边界、统一成本和安全恢复 |
+
+## 开发与测试
+
+上下文投影、摘要成本与恢复边界见 [V3 设计](docs/design/v3-context-recovery.md)。
+
+源码位于 [src](src)，场景测试位于 [tests](tests)，请求及样例工程位于 [examples](examples)。
+
+```powershell
+# 构建并执行全量离线测试
 .\scripts\verify.ps1
 ```
 
-验证不读取历史验收产物。跳过项单独统计，不计入通过数；以当前运行生成的日志和报告为准。测试覆盖运行控制、协议兼容、故障恢复和编码修复闭环。
+测试覆盖模型与协议、命令控制、文件操作、真实进程和持久化故障。外部模型测试位于 [MiniHarness.LiveTests](tests/MiniHarness.LiveTests)，需真实服务配置并会消耗模型额度，不由默认离线命令触发。
 
-最近一次本地重验（2026-10-19，V2）：Release 构建 0 警告、0 错误；全量 **82 通过、1 个文件符号链接权限跳过、0 失败**。覆盖旧版本回归、真实进程生命周期、等待与纠正、故障恢复，以及两种上游协议与三个入口的确定性对照。真实模型结果按供应商配置单独记录，不与离线通过数混算。
+## 适用范围
 
-完整离线入口同时执行全量回归、两类样例编码演练和三次 HTTP 续接：
-
-```powershell
-.\scripts\accept-v1.ps1
-# 可指定报告输出位置；每次运行创建独立子目录
-.\scripts\accept-v1.ps1 -OutputDirectory (Join-Path $env:TEMP 'MiniHarness-review')
-```
-
-默认报告根目录为系统临时目录下的 `MiniHarness/validation`，可通过 `MINIHARNESS_VALIDATION_ROOT` 覆盖；脚本参数 `-OutputDirectory` 优先。脚本会打印本轮 `acceptance.log` 路径，诊断、工程副本、检查点及编码报告一起保存在本轮目录中。环境变量只在当前脚本及子进程中临时设置，退出后恢复。运行时默认存储配置和已有数据不受影响。
-
-检查点并发发布、账本受控占用与有限发布重试均有回归。持续持久化失败仍进入核实，不自动重放源码修改。历史自然失败的具体触发方不一定都已确认，不能用一次通过宣称所有历史原因已关闭。
-
-此前两类真实模型编码任务曾分别通过，其中第二类保留了一次预算失败后明确需求范围再运行的经历。这是历史覆盖说明，不是新一轮验收结果，也不依赖某个开发者本机报告路径。若本轮没有显式调用真实模型，不得将离线演练标记为真实模型通过。
-
-如需重新进行真实模型验证，显式执行以下命令；这会消耗模型额度：
-
-```powershell
-.\scripts\verify.ps1 -Stage 7
-```
-
-上面的命令验证 V0 真实模型工具闭环。V1 编码验收使用 `scripts/accept-v1.ps1`，默认离线；在权限和模型额度具备时，显式加上 `-RequireSymlinkTests -LiveModel` 完成严格验收。
-
-V2 使用 `scripts/accept-v2.ps1`，默认运行全量回归、V1 编码演练及两次额外控制场景复跑。真实模型需显式添加 `-LiveModel -Protocol ChatCompletions` 或选择 `Responses`，会消耗额度。修复 Responses 截断原因兼容后，火山引擎 plan/v3 的两种上游协议各三个长任务场景均已通过，详见 [真实模型验收](references/V2-真实模型验收-2026-10-19.md)。结论限定本次配置；其他网关的历史阻塞保留。
-
-## 进一步阅读
-
-- [架构概括](references/Agent-Model-Harness架构概括.md)：核心概念与职责划分。
-- [架构与最小实现指南](references/Agent-Model-Harness架构与最小实现指南.md)：设计参考与演进路线。
-- [样例工程](examples/sample-dotnet-project/)：零 NuGet 依赖、带种子缺陷与 self-test 的真实模型验收样例。
-- [源码](src)：具体实现。
-- [测试](tests)：可执行场景与边界验证。
-
-架构文档描述设计方向；本 README 区分当前能力与后续目标，具体行为以源码和可重复验证的结果为依据。
+- 面向单宿主、共享信任域与受信任工程，当前不提供 OS 沙箱、多租户隔离或分布式调度。
+- 支持文本与函数调用协议子集；模型输出 SSE 为缓冲式，实时任务进度使用原生事件接口。
+- 文件修改采用创建和唯一文本替换，不提供语义重构、多文件事务或自动 Git 提交。
+- 后台进程采用 Windows Job 管理；不提供 PTY、任意 shell 或跨宿主重启无缝接管。
+- 上下文压缩保留原历史，不缩小整个检查点；固定部分超限、摘要无收益或预算不足时仍会受控停止。尚无向量检索、跨供应商原生项迁移或任意状态自动恢复。

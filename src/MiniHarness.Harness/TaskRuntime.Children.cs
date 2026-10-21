@@ -56,12 +56,24 @@ namespace MiniHarness.Harness
         private async Task CollectChildAsync(AgentTaskState task, string childId)
         {
             var link = task.Children.SingleOrDefault(c => c.TaskId == childId) ?? throw new TaskConflictException("Child does not belong to this task.");
-            if (link.Collected) return;
+            if (link.Collected && link.Usage?.Usage.Known != false) return;
             // The child lease prevents collection while a child operation is still
             // running. Close it durably before releasing the parent's reservation.
             await using var lease = await store.AcquireAsync(childId, CancellationToken.None).ConfigureAwait(false);
             var child = await lease.LoadAsync(CancellationToken.None).ConfigureAwait(false) ?? throw new TaskConflictException("Child has not started.");
             if (child.ParentTaskId != task.Id || child.Children.Any(c => !c.Collected)) throw new TaskConflictException("Invalid child ownership or outstanding descendants.");
+            if (link.Collected)
+            {
+                if (!child.Budget.Usage.Known) return;
+                var old = link.Usage!;
+                if (old.ModelCalls != child.Budget.ModelCalls || old.ToolCalls != child.Budget.ToolCalls ||
+                    child.Budget.Usage.InputTokens < old.Usage.InputTokens || child.Budget.Usage.OutputTokens < old.Usage.OutputTokens)
+                    throw new TaskConflictException("Collected child accounting changed beyond usage reconciliation.");
+                task.Budget.Usage.InputTokens += child.Budget.Usage.InputTokens - old.Usage.InputTokens;
+                task.Budget.Usage.OutputTokens += child.Budget.Usage.OutputTokens - old.Usage.OutputTokens;
+                link.Usage = TaskJson.Clone(child.Budget); UpdateUsageKnowledge(task);
+                Emit(task, "ChildUsageReconciled", detail: child.Id); return;
+            }
             if (child.Resources.Any(r => !ResourceFinished(r))) throw new TaskConflictException("Child resources require confirmed cleanup before collection.");
             if (child.Turns.LastOrDefault()?.Status != TurnStatus.Completed && child.Status != AgentTaskStatus.Completed &&
                 child.Status != AgentTaskStatus.Cancelled && child.Status != AgentTaskStatus.Failed)
@@ -81,7 +93,7 @@ namespace MiniHarness.Harness
             task.Budget.ModelCalls += child.Budget.ModelCalls;
             task.Budget.ToolCalls += child.Budget.ToolCalls;
             task.Budget.Usage.Add(child.Budget.Usage);
-            task.History.Add(new HistoryEntry { TurnId = task.Turns.Last().Id, Message = new Message { Role = "system",
+            task.History.Add(new HistoryEntry { TurnId = task.Turns.Last().Id, Source = "runtime_feedback", Message = new Message { Role = "system",
                 Text = "Child task result: " + JsonSerializer.Serialize(new { child.Id, child.Status, link.Result, child.Budget }, TaskJson.Options) } });
             Emit(task, "ChildCollected", detail: child.Id);
         }

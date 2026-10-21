@@ -9,7 +9,8 @@ namespace MiniHarness.Harness
         {
             var request = TaskJson.Clone(turn.Settings);
             var turns = task.Turns.TakeWhile(t => t.Id != turn.Id).Select(t => t.Id).Append(turn.Id).ToHashSet();
-            request.Messages = task.History.Where(h => turns.Contains(h.TurnId)).Select(h => TaskJson.Clone(h.Message)).ToList();
+            var history = turn.ResponseHistoryCount.HasValue ? task.History.Take(turn.ResponseHistoryCount.Value) : task.History;
+            request.Messages = history.Where(h => turns.Contains(h.TurnId)).Select(h => TaskJson.Clone(h.Message)).ToList();
             RunStatus status = RunStatus.WaitingForUser;
             if (turn.Status == TurnStatus.Ready || turn.Status == TurnStatus.Running) status = RunStatus.Running;
             if (turn.Status == TurnStatus.Completed) status = RunStatus.Completed;

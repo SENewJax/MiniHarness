@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace MiniHarness.Abstractions
 {
@@ -46,6 +47,8 @@ namespace MiniHarness.Abstractions
 
     public sealed class ModelRequest
     {
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public ModelInvocationPurpose? InvocationPurpose { get; set; }
         public string Model { get; set; } = "";
         public string Instructions { get; set; } = "";
         public bool StoreResponse { get; set; } = true;

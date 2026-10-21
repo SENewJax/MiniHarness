@@ -12,6 +12,7 @@ namespace MiniHarness.Harness
     public sealed class FileTaskStore : ITaskStore, ITaskCatalog
     {
         private readonly string directory;
+        private readonly long maxCheckpointBytes;
         public System.Collections.Generic.IEnumerable<string> EnumerateTaskIds()
             => Directory.EnumerateFiles(directory, "task_*.json").Select(Path.GetFileNameWithoutExtension).Select(id => id!);
         // A writer lease excludes other writers, not status/event readers.
@@ -24,8 +25,11 @@ namespace MiniHarness.Harness
             var comparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
             return fileGates[(int)((uint)comparer.GetHashCode(path) % (uint)fileGates.Length)];
         }
-        public FileTaskStore(string directory)
+        public FileTaskStore(string directory) : this(directory, 64 * 1024 * 1024) { }
+        public FileTaskStore(string directory, long maxCheckpointBytes)
         {
+            if (maxCheckpointBytes < 4096) throw new ArgumentException("Checkpoint byte limit is too small.");
+            this.maxCheckpointBytes = maxCheckpointBytes;
             this.directory = Path.GetFullPath(directory);
             Directory.CreateDirectory(this.directory);
         }
@@ -42,16 +46,15 @@ namespace MiniHarness.Harness
             using var json = await ReadIfExistsAsync(path, cancellationToken).ConfigureAwait(false);
             if (json != null)
             {
-                if (!json.RootElement.TryGetProperty("schemaVersion", out var version) || version.GetInt32() != AgentTaskState.CurrentSchemaVersion)
-                    throw new InvalidDataException("Unsupported task checkpoint schema version.");
-                var task = json.RootElement.Deserialize<AgentTaskState>(TaskJson.Options)!;
+                var task = TaskStateMigration.Read(json.RootElement);
                 if (task.Id != taskId || task.Revision < 1) throw new InvalidDataException("Task checkpoint identity or revision is invalid.");
                 return task;
             }
             string legacyPath = Path.Combine(directory, "resp_" + taskId.Substring(5) + ".json");
             using var legacy = await ReadIfExistsAsync(legacyPath, cancellationToken).ConfigureAwait(false);
             if (legacy == null) return null;
-            return LegacyTaskMigration.Convert(legacy.RootElement.Deserialize<RunState>(TaskJson.Options)!);
+            var converted = LegacyTaskMigration.Convert(legacy.RootElement.Deserialize<RunState>(TaskJson.Options)!);
+            TaskStateMigration.InitializeLedger(converted); return converted;
         }
         public Task<ITaskLease> AcquireAsync(string id, CancellationToken cancellationToken)
         {
@@ -84,7 +87,7 @@ namespace MiniHarness.Harness
             var legacy = await LoadAsync(responseId, cancellationToken).ConfigureAwait(false);
             return legacy == null ? null : new TaskResponseReference { TaskId = legacy.Id, TurnId = legacy.Turns[0].Id };
         }
-        private static async Task<JsonDocument?> ReadIfExistsAsync(string path, CancellationToken cancellationToken)
+        private async Task<JsonDocument?> ReadIfExistsAsync(string path, CancellationToken cancellationToken)
         {
             var gate = FileGate(path);
             await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -92,11 +95,12 @@ namespace MiniHarness.Harness
             {
                 if (!File.Exists(path)) return null;
                 using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                if (stream.Length > maxCheckpointBytes) throw new InvalidDataException("Task checkpoint exceeds its byte limit.");
                 return await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken).ConfigureAwait(false);
             }
             finally { gate.Release(); }
         }
-        private static async Task WriteAsync<T>(string path, T value, CancellationToken cancellationToken)
+        private static async Task WriteAsync<T>(string path, T value, CancellationToken cancellationToken, long maxBytes = long.MaxValue)
         {
             string temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
             try
@@ -105,12 +109,19 @@ namespace MiniHarness.Harness
                     FileOptions.Asynchronous | FileOptions.WriteThrough))
                 {
                     await JsonSerializer.SerializeAsync(stream, value, TaskJson.Options, cancellationToken).ConfigureAwait(false);
+                    if (stream.Length > maxBytes) throw new IOException("Task checkpoint byte limit exceeded; no snapshot was published.");
                     stream.Flush(true);
                 }
-                var gate = FileGate(path);
-                await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-                try { File.Move(temporary, path, true); }
-                finally { gate.Release(); }
+                for (int attempt = 0; ; attempt++)
+                {
+                    var gate = FileGate(path); await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                    try { File.Move(temporary, path, true); break; }
+                    catch (Exception error) when (attempt < 6 && (error is IOException || error is UnauthorizedAccessException) &&
+                        ((uint)error.HResult & 0xffff0000u) == 0x80070000u && (error.HResult & 0xffff) is 5 or 32 or 33)
+                    { /* Retry only publishing the same immutable snapshot, never model/tool effects. */ }
+                    finally { gate.Release(); }
+                    await Task.Delay(10 << attempt, cancellationToken).ConfigureAwait(false);
+                }
             }
             finally { if (File.Exists(temporary)) File.Delete(temporary); }
         }
@@ -128,9 +139,22 @@ namespace MiniHarness.Harness
                 if (state.Id != id || state.SchemaVersion != AgentTaskState.CurrentSchemaVersion) throw new ArgumentException("Invalid task checkpoint.");
                 var existing = await LoadAsync(cancellationToken).ConfigureAwait(false);
                 if ((existing?.Revision ?? 0) != expectedRevision) throw new TaskConflictException("Task revision changed.");
+                TaskStateMigration.Validate(state);
+                string checkpointPath = Path.Combine(owner.directory, id + ".json");
+                using (var source = await owner.ReadIfExistsAsync(checkpointPath, cancellationToken).ConfigureAwait(false))
+                    if (source != null && source.RootElement.GetProperty("schemaVersion").GetInt32() == 1)
+                    {
+                        string backup = checkpointPath + ".v1.bak";
+                        if (!File.Exists(backup))
+                        {
+                            string pendingBackup = backup + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                            try { File.Copy(checkpointPath, pendingBackup); File.Move(pendingBackup, backup); }
+                            finally { if (File.Exists(pendingBackup)) File.Delete(pendingBackup); }
+                        }
+                    }
                 state.Revision = expectedRevision + 1;
                 foreach (var item in state.Events.Where(e => e.Revision == 0)) item.Revision = state.Revision;
-                try { await WriteAsync(Path.Combine(owner.directory, id + ".json"), state, cancellationToken).ConfigureAwait(false); }
+                try { await WriteAsync(checkpointPath, state, cancellationToken, owner.maxCheckpointBytes).ConfigureAwait(false); }
                 catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
                 {
                     state.Revision = expectedRevision;

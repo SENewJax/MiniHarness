@@ -8,16 +8,21 @@ namespace MiniHarness.Harness
 {
     public sealed class ContextLimitException : Exception
     {
-        public ContextLimitException() : base("Context character limit exceeded; no history was silently dropped.") { }
+        public string Reason { get; }
+        public ContextLimitException(string reason = "context_capacity") : base("Context preparation stopped: " + reason + "; no history was silently dropped.") { Reason = reason; }
     }
 
-    public sealed class ContextBuilder : IContextBuilder
+    public sealed class ContextBuilder : IContextComposer
     {
         private readonly HarnessOptions options;
         private readonly IModelRequestSizer? sizer;
         public ContextBuilder(HarnessOptions options, IModelRequestSizer? sizer = null) { this.options = options; this.sizer = sizer; }
 
         public ModelRequest Build(RunState state, IReadOnlyList<ToolDefinition> localTools)
+        {
+            var request = ComposeDraft(state, localTools); ValidateCapacity(request); return request;
+        }
+        public ModelRequest ComposeDraft(RunState state, IReadOnlyList<ToolDefinition> localTools)
         {
             var request = new ModelRequest
             {
@@ -36,8 +41,10 @@ namespace MiniHarness.Harness
             if (!string.IsNullOrWhiteSpace(state.Request.Instructions))
                 request.Messages.Insert(string.IsNullOrWhiteSpace(options.SystemInstructions) ? 0 : 1,
                     new Message { Role = "system", Text = state.Request.Instructions });
-            // Deterministic capacity guard, not a tokenizer or semantic compactor.
-            int characters = sizer?.MeasureCharacters(request) ?? JsonSerializer.Serialize(new
+            return request;
+        }
+        public int Measure(ModelRequest request)
+            => sizer?.MeasureCharacters(request) ?? JsonSerializer.Serialize(new
             {
                 request.Model, request.Instructions, request.Tools, request.Options,
                 Messages = request.Messages.Select(m => new
@@ -48,9 +55,10 @@ namespace MiniHarness.Harness
                     m.ProviderItems
                 })
             }).Length;
-            if (characters > options.MaxContextCharacters)
+        public void ValidateCapacity(ModelRequest request)
+        {
+            if (Measure(request) > options.MaxContextCharacters)
                 throw new ContextLimitException();
-            return request;
         }
     }
 

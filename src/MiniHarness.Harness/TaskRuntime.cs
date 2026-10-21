@@ -6,11 +6,12 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using MiniHarness.Abstractions;
+using MiniHarness.Harness.Context;
 
 namespace MiniHarness.Harness
 {
     // Owns task lifetime. HTTP cancellation only stops the caller's wait.
-    public sealed partial class TaskRuntime : ITaskRuntime, IResourceOutputAccess, IAsyncDisposable
+    public sealed partial class TaskRuntime : ITaskRuntime, IResourceOutputAccess, ITaskDiagnostics, IAsyncDisposable
     {
         private readonly ITaskStore store;
         private readonly IModelProvider model;
@@ -25,25 +26,49 @@ namespace MiniHarness.Harness
         private readonly IWorkspaceRevisionProvider workspaceRevision;
         private readonly Dictionary<string, IResourceManager> resourceManagers;
         private readonly Action<string, Exception>? executionFailed;
+        private readonly ContextOptions contextOptions;
+        private readonly RecoveryOptions recoveryOptions;
+        private readonly IRecoveryAuthorizer? recoveryAuthorizer;
+        private readonly ISummaryGenerator summaryGenerator;
+        private readonly ConversationSegmenter segmenter;
+        public string HostGeneration { get; } = Guid.NewGuid().ToString("N");
+        public Action<string>? FaultInjection { get; set; }
         private readonly ConcurrentDictionary<string, Slot> slots = new ConcurrentDictionary<string, Slot>();
         private readonly ConcurrentDictionary<long, Task> active = new ConcurrentDictionary<long, Task>();
+        private readonly ConcurrentDictionary<string, TaskExecutionFailure> failures = new ConcurrentDictionary<string, TaskExecutionFailure>();
         private long invocation;
         private volatile bool disposed;
         private volatile bool stopping;
+
+        // Preserve the V2 constructor's binary signature; the extended overload
+        // remains the source-compatible entry point for optional V3 services.
+        public TaskRuntime(IModelProvider model, ITaskStore store, HarnessOptions options, ModelBinding binding,
+            IContextBuilder? context, IToolRegistry? tools, IToolPolicy? toolPolicy, IContextualToolPolicy? policy,
+            IToolExecutor? executor, IContextPreparation? preparation, ITaskCompletionPolicy? completion,
+            IWorkspaceRevisionProvider? workspaceRevision, IEnumerable<IResourceManager>? resourceManagers, Action<string, Exception>? executionFailed)
+            : this(model, store, options, binding, context, tools, toolPolicy, policy, executor, preparation, completion, workspaceRevision,
+                resourceManagers, executionFailed, null, null, null, null) { }
 
         public TaskRuntime(IModelProvider model, ITaskStore store, HarnessOptions options, ModelBinding binding,
             IContextBuilder? context = null, IToolRegistry? tools = null, IToolPolicy? toolPolicy = null,
             IContextualToolPolicy? policy = null, IToolExecutor? executor = null,
             IContextPreparation? preparation = null, ITaskCompletionPolicy? completion = null, IWorkspaceRevisionProvider? workspaceRevision = null,
-            IEnumerable<IResourceManager>? resourceManagers = null, Action<string, Exception>? executionFailed = null)
+            IEnumerable<IResourceManager>? resourceManagers = null, Action<string, Exception>? executionFailed = null,
+            ContextOptions? contextOptions = null, RecoveryOptions? recoveryOptions = null, IRecoveryAuthorizer? recoveryAuthorizer = null,
+            ISummaryGenerator? summaryGenerator = null)
         {
             options.Validate(); this.model = model; this.store = store;
             this.options = TaskJson.Clone(options); this.binding = TaskJson.Clone(binding);
             this.context = context ?? new ContextBuilder(this.options, model as IModelRequestSizer);
+            this.contextOptions = TaskJson.Clone(contextOptions ?? new ContextOptions()); this.contextOptions.Validate();
+            this.recoveryOptions = TaskJson.Clone(recoveryOptions ?? new RecoveryOptions()); this.recoveryOptions.Validate();
+            this.recoveryAuthorizer = recoveryAuthorizer; this.summaryGenerator = summaryGenerator ?? new ModelSummaryGenerator();
+            segmenter = new ConversationSegmenter(model as IModelContinuationPolicy);
+            if (this.contextOptions.Enabled && this.context is not IContextComposer) throw new ArgumentException("V3 requires a context composer with shared wire measurement.");
             this.tools = tools ?? new ToolRegistry(Array.Empty<ITool>());
             this.policy = policy ?? new LegacyToolPolicyAdapter(toolPolicy ?? new AllowListToolPolicy(Array.Empty<string>()));
             this.executor = new ContextualToolExecutor(executor ?? new ToolExecutor(this.options));
-            this.preparation = preparation ?? new PassThroughPreparation();
+            this.preparation = preparation ?? (this.contextOptions.Enabled ? new SummaryContextPreparation(new ModelContextProjection(segmenter)) : new PassThroughPreparation());
             this.completion = completion ?? new EvidenceCompletionPolicy();
             this.workspaceRevision = workspaceRevision ?? new DirectoryWorkspaceRevision();
             this.resourceManagers = (resourceManagers ?? Array.Empty<IResourceManager>()).ToDictionary(m => m.Kind, StringComparer.Ordinal);
@@ -93,12 +118,15 @@ namespace MiniHarness.Harness
             var execution = Task.Run(async () =>
             {
                 bool transferred = false;
+                string? capturedRecoveryToken = copy.RecoveryToken;
                 try
                 {
                 await slot.Admission.WaitAsync().ConfigureAwait(false);
                 try
                 {
                     var snapshot = await store.LoadAsync(id, CancellationToken.None).ConfigureAwait(false);
+                    if (copy.Kind == TaskCommandKind.Resume && capturedRecoveryToken == null && snapshot != null)
+                        capturedRecoveryToken = ContinuationToken(snapshot);
                     var receipt = snapshot?.Receipts.FirstOrDefault(r => r.CommandId == copy.Id);
                     if (receipt != null)
                     {
@@ -125,18 +153,25 @@ namespace MiniHarness.Harness
                     {
                         ValidateSteeringPayload(copy.Steering);
                         lock (slot.Sync) { slot.Steering.Add(copy.Id); }
+                        FaultInjection?.Invoke("steering_admitted");
                     }
                 }
                 finally { slot.Admission.Release(); }
                 transferred = true;
-                return await ExecuteCoreAsync(copy, id, slot, accepted, gateTicket).ConfigureAwait(false);
+                return await ExecuteCoreAsync(copy, id, slot, accepted, gateTicket, capturedRecoveryToken).ConfigureAwait(false);
                 }
                 catch (Exception ex)
                 {
                     // SubmitAsync may already have returned its durable receipt.
                     // A background failure must remain observable to the host.
-                    if (accepted.Task.IsCompletedSuccessfully && executionFailed != null)
-                        try { executionFailed(id, ex); } catch { /* Diagnostics must not replace the execution failure. */ }
+                    if (accepted.Task.IsCompletedSuccessfully)
+                    {
+                        if (failures.Count < 128 || failures.ContainsKey(id)) failures[id] = new TaskExecutionFailure { TaskId = id,
+                            ErrorType = ex.GetType().Name, HResult = ex.HResult, InnerType = ex.InnerException?.GetType().Name,
+                            InnerHResult = ex.InnerException?.HResult, Stack = (ex.InnerException?.StackTrace ?? ex.StackTrace ?? "").Substring(0,
+                                Math.Min(16384, (ex.InnerException?.StackTrace ?? ex.StackTrace ?? "").Length)), AtUtc = DateTimeOffset.UtcNow };
+                        if (executionFailed != null) try { executionFailed(id, ex); } catch { /* Diagnostics must not replace execution failure. */ }
+                    }
                     throw;
                 }
                 finally
@@ -168,7 +203,7 @@ namespace MiniHarness.Harness
             if (afterSequence > state.Events.Count) throw new ArgumentException("Event cursor is ahead of the task.");
             return state.Events.Where(e => e.Sequence > afterSequence).Select(TaskJson.Clone).ToList();
         }
-        private async Task<TaskCommandResult> ExecuteCoreAsync(TaskCommand command, string id, Slot slot, TaskCompletionSource<CommandReceipt> accepted, Task gateTicket)
+        private async Task<TaskCommandResult> ExecuteCoreAsync(TaskCommand command, string id, Slot slot, TaskCompletionSource<CommandReceipt> accepted, Task gateTicket, string? capturedRecoveryToken)
         {
             await gateTicket.ConfigureAwait(false);
             try
@@ -191,18 +226,24 @@ namespace MiniHarness.Harness
                 }
                 if (task == null && command.Kind != TaskCommandKind.Start) throw new ArgumentException("Task not found.");
                 task ??= await NewTaskAsync(id, command).ConfigureAwait(false);
+                if (command.Kind != TaskCommandKind.Start && command.Kind != TaskCommandKind.Pause && command.Kind != TaskCommandKind.Cancel &&
+                    command.Kind != TaskCommandKind.QueryResource && command.Kind != TaskCommandKind.CancelResource && command.Kind != TaskCommandKind.ReconcileResources)
+                    await RecoverTaskAsync(task, lease, command.Kind == TaskCommandKind.Recover);
                 bool terminal = task.Status == AgentTaskStatus.Completed || task.Status == AgentTaskStatus.Cancelled || task.Status == AgentTaskStatus.Failed;
                 if (terminal && !(command.Kind == TaskCommandKind.Cancel && task.Status == AgentTaskStatus.Cancelled) && command.Kind != TaskCommandKind.Reconcile &&
-                    command.Kind != TaskCommandKind.QueryResource && command.Kind != TaskCommandKind.CancelResource && command.Kind != TaskCommandKind.ReconcileResources && command.Kind != TaskCommandKind.CollectChild && command.Kind != TaskCommandKind.ResourceWake)
+                    command.Kind != TaskCommandKind.QueryResource && command.Kind != TaskCommandKind.CancelResource && command.Kind != TaskCommandKind.ReconcileResources && command.Kind != TaskCommandKind.CollectChild && command.Kind != TaskCommandKind.ResourceWake && command.Kind != TaskCommandKind.Recover && command.Kind != TaskCommandKind.ReconcileModelUsage && command.Kind != TaskCommandKind.ReconcileResourceState)
                     throw new TaskConflictException("Terminal task cannot be advanced.");
                 bool controlOnly = command.Kind == TaskCommandKind.QueryResource || command.Kind == TaskCommandKind.CancelResource ||
                     command.Kind == TaskCommandKind.ReconcileResources || command.Kind == TaskCommandKind.WriteResourceInput ||
-                    command.Kind == TaskCommandKind.Pause || command.Kind == TaskCommandKind.Cancel;
-                if (!controlOnly && (task.Model.Model != binding.Model || (task.Model.Protocol != "Unspecified" && task.Model.Protocol != binding.Protocol)))
+                    command.Kind == TaskCommandKind.Pause || command.Kind == TaskCommandKind.Cancel || command.Kind == TaskCommandKind.Recover || command.Kind == TaskCommandKind.ReconcileModelUsage || command.Kind == TaskCommandKind.Reconcile || command.Kind == TaskCommandKind.ReconcileResourceState;
+                if (!controlOnly && !BindingCompatible(task.Model))
                     throw new TaskConflictException("Task model/protocol binding differs from this runtime.");
+                if (!controlOnly && task.Recovery.Classification == RecoveryClassification.HostAuthorization)
+                    throw new TaskConflictException("Task authorization differs from this host: " + string.Join(",", task.Recovery.Blockers));
                 if (!controlOnly) task.Model = TaskJson.Clone(binding);
                 TaskTurn? turn = task.Turns.LastOrDefault();
                 bool advance = false;
+                bool compactOnly = false;
                 switch (command.Kind)
                 {
                     case TaskCommandKind.Start:
@@ -218,9 +259,44 @@ namespace MiniHarness.Harness
                     case TaskCommandKind.Resume:
                         if (task.Status == AgentTaskStatus.Cancelled || task.Status == AgentTaskStatus.Completed || task.Status == AgentTaskStatus.Failed)
                             throw new TaskConflictException("Terminal task cannot resume.");
-                        advance = turn != null && turn.Status != TurnStatus.Completed;
+                        RefreshRecoveryState(task);
+                        AlignRecoveryWait(task);
+                        if ((capturedRecoveryToken != null && capturedRecoveryToken != task.Recovery.ContinuationToken) ||
+                            task.Recovery.ConsumedTokens.Contains(task.Recovery.ContinuationToken))
+                        { Emit(task, "ResumeSkipped", turn, "stale_recovery_point"); break; }
+                        advance = turn != null && turn.Status != TurnStatus.Completed && task.Recovery.CanResume;
+                        if (advance)
+                        {
+                            task.Recovery.ConsumedTokens.Add(task.Recovery.ContinuationToken);
+                            if (task.Recovery.ConsumedTokens.Count > 64) task.Recovery.ConsumedTokens.RemoveAt(0);
+                            task.Recovery.AutomaticAllowed = true;
+                        }
+                        if (turn != null && turn.Status != TurnStatus.Completed && !advance) break;
                         if (!advance) { task.Status = AgentTaskStatus.Waiting; task.Wait = WaitReason.Input; }
                         break;
+                    case TaskCommandKind.Recover:
+                        break;
+                    case TaskCommandKind.ReconcileModelUsage:
+                        ReconcileModelUsage(task, command.ModelUsage ?? throw new ArgumentException("Model usage reconciliation required."));
+                        break;
+                    case TaskCommandKind.ReconcileResourceState:
+                    {
+                        if (recoveryAuthorizer is not IResourceRecoveryAuthorizer authority || !authority.AllowsResourceReconciliation)
+                            throw new TaskConflictException("Host policy does not authorize resource reconciliation.");
+                        var resource = task.Resources.SingleOrDefault(r => r.Id == command.ResourceId) ?? throw new ArgumentException("Resource not found.");
+                        if (!resourceManagers.TryGetValue(resource.Kind, out var manager) || manager is not IResourceReconciler reconciler)
+                            throw new ArgumentException("Resource manager does not accept trusted observations.");
+                        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(recoveryOptions.ManagementTimeoutSeconds));
+                        var observed = await reconciler.ReconcileAsync(TaskJson.Clone(resource), command.ResourceReconciliation ?? throw new ArgumentException("Resource observation required."), deadline.Token).WaitAsync(deadline.Token);
+                        if (observed.Id != resource.Id || observed.OwnerTaskId != task.Id || observed.OwnerOperationId != resource.OwnerOperationId || observed.Kind != resource.Kind)
+                            throw new TaskConflictException("Observed resource ownership changed.");
+                        task.Resources[task.Resources.IndexOf(resource)] = observed; Emit(task, "ResourceReconciled", turn, resource.Id); break;
+                    }
+                    case TaskCommandKind.CompactContext:
+                        if (!contextOptions.Enabled || turn == null || task.Status == AgentTaskStatus.Running ||
+                            task.Operations.Any(o => o.Status != OperationStatus.Finished) || UncertainResources(task))
+                            throw new TaskConflictException("Explicit compaction requires an enabled, settled waiting/paused boundary.");
+                        compactOnly = true; break;
                     case TaskCommandKind.Approval:
                         if (turn == null) throw new TaskConflictException("No active turn.");
                         var operation = task.Operations.SingleOrDefault(o => o.Id == command.OperationId && o.TurnId == turn.Id);
@@ -252,7 +328,17 @@ namespace MiniHarness.Harness
                             throw new ArgumentException("Reconciliation requires a confirmed effect or confirmed absence of effect.");
                         var uncertainOperation = task.Operations.SingleOrDefault(o => o.Id == command.OperationId && o.TurnId == turn.Id && o.Status == OperationStatus.Unknown);
                         if (uncertainOperation == null) throw new TaskConflictException("No matching uncertain operation.");
-                        if (command.ReconciledOutcome.Effect == EffectState.Confirmed) FinishOperation(task, turn, uncertainOperation, command.ReconciledOutcome);
+                        if (command.ReconciledOutcome.Effect == EffectState.Confirmed)
+                        {
+                            var outcome = TaskJson.Clone(command.ReconciledOutcome);
+                            // Recovery may already have located this operation's
+                            // durable resource intent. Confirmation registers it
+                            // once and never replaces a fresher manager snapshot.
+                            outcome.Resources.RemoveAll(r => task.Resources.Any(existing => existing.Id == r.Id && existing.Kind == r.Kind &&
+                                existing.OwnerTaskId == task.Id && existing.OwnerOperationId == uncertainOperation.Id &&
+                                (r.OwnerTaskId.Length == 0 || r.OwnerTaskId == task.Id) && (r.OwnerOperationId.Length == 0 || r.OwnerOperationId == uncertainOperation.Id)));
+                            FinishOperation(task, turn, uncertainOperation, outcome);
+                        }
                         else { uncertainOperation.Status = OperationStatus.Proposed; uncertainOperation.Effect = EffectState.None; uncertainOperation.Approval = ApprovalState.None; }
                         Emit(task, "OperationReconciled", turn, command.ReconciledOutcome.Effect.ToString(), uncertainOperation);
                         advance = !terminal;
@@ -281,9 +367,12 @@ namespace MiniHarness.Harness
                         lock (slot.Sync) slot.Steering.Remove(command.Id);
                         break;
                     case TaskCommandKind.ResourceWake:
-                        advance = await WakeAsync(task, turn, command, lease);
+                        if (!command.Automatic || task.Recovery.AutomaticAllowed || task.Status == AgentTaskStatus.Paused)
+                            advance = await WakeAsync(task, turn, command, lease);
                         break;
                     case TaskCommandKind.WriteResourceInput:
+                        if (!BindingCompatible(task.Model) || task.Recovery.Classification == RecoveryClassification.HostAuthorization ||
+                            !task.Facts.Workspace.Grants.Contains("execute")) throw new TaskConflictException("Current host authorization does not allow process input.");
                         await WriteResourceInputAsync(task, turn, lease, command);
                         break;
                     case TaskCommandKind.QueryResource:
@@ -329,38 +418,59 @@ namespace MiniHarness.Harness
                 await CommitAsync(lease, task).ConfigureAwait(false);
                 accepted.TrySetResult(TaskJson.Clone(receipt));
                 if (command.Kind == TaskCommandKind.StartChild) await DispatchChildrenAsync(task).ConfigureAwait(false);
-                if (advance && turn != null)
+                if (advance && (!BindingCompatible(task.Model) || task.Recovery.Classification == RecoveryClassification.HostAuthorization)) advance = false;
+                if (advance && command.Kind != TaskCommandKind.ResourceWake) task.Recovery.AutomaticAllowed = true;
+                if ((advance || compactOnly) && turn != null)
                 {
+                    bool completedBoundary = compactOnly && turn.Status == TurnStatus.Completed;
+                    var boundaryStatus = task.Status; var boundaryWait = task.Wait; var turnWait = turn.Wait; var turnReason = turn.StopReason;
+                    failures.TryRemove(task.Id, out _);
                     using var cancellation = new CancellationTokenSource();
                     lock (slot.Sync)
                     {
                         slot.Cancellation = cancellation;
                         if (slot.Interrupt != null) cancellation.Cancel();
                     }
-                    try { await AdvanceAsync(task, turn, lease, cancellation.Token).ConfigureAwait(false); }
+                    try
+                    {
+                        if (compactOnly)
+                        {
+                            var compactStep = new TaskStep { TurnId = turn.Id, Model = TaskJson.Clone(binding), Capabilities = CaptureCapabilities(task), SteeringRevision = task.SteeringRevision };
+                            try { await PrepareTaskRequestAsync(task, turn, compactStep, lease, new ContextAdvanceBudget(), cancellation.Token, true); }
+                            finally
+                            {
+                                if (completedBoundary) { task.Status = boundaryStatus; task.Wait = boundaryWait; turn.Status = TurnStatus.Completed; turn.Wait = turnWait; turn.StopReason = turnReason; }
+                            }
+                            await CommitAsync(lease, task);
+                        }
+                        else await AdvanceAsync(task, turn, lease, cancellation.Token).ConfigureAwait(false);
+                    }
                     catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
                     {
                         task.Status = slot.Interrupt == TaskCommandKind.Cancel ? AgentTaskStatus.Cancelled : AgentTaskStatus.Paused;
-                        turn.Status = TurnStatus.Interrupted;
-                        foreach (var step in task.Steps.Where(s => s.TurnId == turn.Id && (s.Status == StepStatus.Preparing || s.Status == StepStatus.Running)))
-                        {
-                            if (step.Status == StepStatus.Running) { task.Budget.Usage.Known = false; turn.Usage.Known = false; }
-                            step.Status = StepStatus.Interrupted;
-                        }
+                        if (!completedBoundary) turn.Status = TurnStatus.Interrupted;
+                        InterruptModelSteps(task, turn);
                         foreach (var pending in task.Operations.Where(o => o.TurnId == turn.Id && o.Status == OperationStatus.Started))
                         { pending.Status = OperationStatus.Unknown; pending.Effect = EffectState.Unknown; task.Wait = WaitReason.Reconciliation; turn.Wait = WaitReason.Reconciliation; }
                         Emit(task, "Interrupted", turn);
                         await CommitAsync(lease, task).ConfigureAwait(false);
                     }
                     catch (CheckpointWriteException) { throw; }
-                    catch (ContextLimitException)
+                    catch (ContextLimitException error)
                     {
-                        Wait(task, turn, WaitReason.Budget, "context_capacity"); await CommitAsync(lease, task).ConfigureAwait(false);
+                        if (completedBoundary) { task.ContextDiagnostics.Reason = error.Reason; Emit(task, "CompactionStopped", turn, error.Reason); }
+                        else Wait(task, turn, WaitReason.Budget, error.Reason);
+                        await CommitAsync(lease, task).ConfigureAwait(false);
                     }
                     catch (Exception ex)
                     {
-                        foreach (var running in task.Steps.Where(s => s.TurnId == turn.Id && s.Status == StepStatus.Running))
-                        { running.Status = StepStatus.Interrupted; task.Budget.Usage.Known = false; turn.Usage.Known = false; }
+                        if (completedBoundary)
+                        {
+                            task.Status = boundaryStatus; task.Wait = boundaryWait; turn.Status = TurnStatus.Completed; turn.Wait = turnWait; turn.StopReason = turnReason;
+                            task.ContextDiagnostics.Reason = ex.GetType().Name; Emit(task, "CompactionStopped", turn, ex.GetType().Name);
+                            await CommitAsync(lease, task); throw;
+                        }
+                        InterruptModelSteps(task, turn);
                         var uncertain = task.Operations.Where(o => o.TurnId == turn.Id && o.Status == OperationStatus.Started).ToList();
                         foreach (var pending in uncertain) { pending.Status = OperationStatus.Unknown; pending.Effect = EffectState.Unknown; }
                         if (uncertain.Count > 0) Wait(task, turn, WaitReason.Reconciliation, ex.GetType().Name);
@@ -377,6 +487,7 @@ namespace MiniHarness.Harness
         }
         private AgentTaskState NewTask(string id, TaskCommand command) => new AgentTaskState
         {
+            Recovery = new RecoveryRecord { HostGeneration = HostGeneration, AutomaticAllowed = true },
             Id = id, ForkedFromResponseId = command.ForkedFromResponseId, Facts = TaskJson.Clone(command.Facts ?? new TaskFacts
             { Goal = command.Request?.Messages.FirstOrDefault(m => m.Role == "user")?.Text ?? "" }),
             Model = TaskJson.Clone(binding), Budget = new TaskBudget
@@ -387,7 +498,7 @@ namespace MiniHarness.Harness
             ValidateTurnRequest(task, request);
             var turn = new TaskTurn { Settings = TaskJson.Clone(request), Status = TurnStatus.Ready };
             turn.Settings.Messages.Clear(); task.Turns.Add(turn);
-            foreach (var message in request.Messages) task.History.Add(new HistoryEntry { TurnId = turn.Id, Message = TaskJson.Clone(message) });
+            foreach (var message in request.Messages) task.History.Add(new HistoryEntry { TurnId = turn.Id, Source = "input", Message = TaskJson.Clone(message) });
             task.Status = AgentTaskStatus.Ready; task.Wait = WaitReason.None;
             return turn;
         }
@@ -411,10 +522,10 @@ namespace MiniHarness.Harness
         }
         private async Task AdvanceAsync(AgentTaskState task, TaskTurn turn, ITaskLease lease, CancellationToken cancellationToken)
         {
+            var contextAdvance = new ContextAdvanceBudget();
             foreach (var pending in task.Operations.Where(o => o.TurnId == turn.Id && o.Status == OperationStatus.Started))
             { pending.Status = OperationStatus.Unknown; pending.Effect = EffectState.Unknown; }
-            foreach (var interrupted in task.Steps.Where(s => s.TurnId == turn.Id && s.Status == StepStatus.Running))
-            { interrupted.Status = StepStatus.Interrupted; task.Budget.Usage.Known = false; }
+            InterruptModelSteps(task, turn);
             while (true)
             {
             cancellationToken.ThrowIfCancellationRequested();
@@ -434,7 +545,14 @@ namespace MiniHarness.Harness
             }
             await RefreshWorkspaceAsync(task, turn, cancellationToken).ConfigureAwait(false);
             if (!await ProcessOperationsAsync(task, turn, lease, cancellationToken).ConfigureAwait(false)) return;
+            await RefreshWorkspaceAsync(task, turn, cancellationToken).ConfigureAwait(false);
+            if (await YieldForSteeringAsync(task, turn, lease)) return;
             FlushObservations(task, turn);
+            if (turn.ResumeCompletionCandidate && turn.LastResponse != null && turn.LastResponse.Message.ToolCalls.Count == 0)
+            {
+                turn.ResumeCompletionCandidate = false;
+                if (await FinishCandidateAsync(task, turn, lease, cancellationToken)) return;
+            }
             if (turn.Wait == WaitReason.Evidence && turn.LastResponse != null && turn.LastResponse.Message.ToolCalls.Count == 0)
                 if (await FinishCandidateAsync(task, turn, lease, cancellationToken).ConfigureAwait(false)) return;
             if (task.Budget.ModelCalls + task.Budget.ReservedModelCalls >= task.Budget.MaxModelCalls || task.Budget.Usage.TotalTokens + task.Budget.ReservedTokens >= task.Budget.MaxTokens ||
@@ -446,47 +564,40 @@ namespace MiniHarness.Harness
             var step = new TaskStep { TurnId = turn.Id, Status = StepStatus.Preparing, Model = TaskJson.Clone(binding), Capabilities = CaptureCapabilities(task), SteeringRevision = task.SteeringRevision };
             task.Steps.Add(step); Emit(task, "StepPreparing", turn);
             await CommitAsync(lease, task).ConfigureAwait(false);
-            var prepared = await preparation.PrepareAsync(new ContextPreparation
-            {
-                Facts = TaskJson.Clone(task.Facts), Step = TaskJson.Clone(step), History = TaskJson.Clone(task.History)
-            }, cancellationToken).ConfigureAwait(false);
+            FaultInjection?.Invoke("preparing");
+            var request = await PrepareTaskRequestAsync(task, turn, step, lease, contextAdvance, cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
-            var view = TaskProjection.ToRun(task, turn);
-            view.Request.Messages = TaskJson.Clone(prepared.Messages);
-            view.Request.Instructions = "Task facts:\n" + JsonSerializer.Serialize(task.Facts, TaskJson.Options) + "\n" + view.Request.Instructions;
-            view.Request.Options.MaxOutputTokens = (int)Math.Min(view.Request.Options.MaxOutputTokens,
-                task.Budget.MaxTokens - task.Budget.Usage.TotalTokens - task.Budget.ReservedTokens);
-            var request = context.Build(view, step.Capabilities.Tools);
-            step.PreparedRequest = TaskJson.Clone(request); step.Status = StepStatus.Running;
-            task.Budget.ModelCalls++; turn.ModelCalls++; Emit(task, "ModelStarted", turn);
-            await CommitAsync(lease, task).ConfigureAwait(false);
-            var response = await model.GenerateAsync(request, cancellationToken).ConfigureAwait(false);
-            ToolCallRules.ValidateIdentity(response.Message.ToolCalls, task.History.Select(h => h.Message));
-            step.Status = StepStatus.Responded; turn.LastResponse = TaskJson.Clone(response);
-            task.Budget.Usage.Add(response.Usage); turn.Usage.Add(response.Usage);
-            task.History.Add(new HistoryEntry { TurnId = turn.Id, StepId = step.Id, Message = TaskJson.Clone(response.Message) });
-            Emit(task, "ModelResponded", turn);
+            if (HasPendingSteering(task.Id)) step.Status = StepStatus.Interrupted;
+            if (await YieldForSteeringAsync(task, turn, lease)) return;
+            if (request == null) return;
+            await RefreshWorkspaceAsync(task, turn, cancellationToken);
+            var capabilities = CaptureCapabilities(task);
+            if (capabilities.Version != step.Capabilities.Version || capabilities.PolicyVersion != step.Capabilities.PolicyVersion ||
+                JsonSerializer.Serialize(capabilities.Workspace, TaskJson.Options) != JsonSerializer.Serialize(step.Capabilities.Workspace, TaskJson.Options))
+            { step.Status = StepStatus.Interrupted; Emit(task, "ContextPreparationInvalidated", turn, "facts_or_capabilities_changed"); continue; }
+            var invocation = await InvokeModelAsync(task, turn, lease, request, ModelInvocationPurpose.Reasoning, cancellationToken, step: step);
+            var response = invocation.Response!;
+            ApplyReasoningResponse(task, turn, step, invocation);
+            await CommitAsync(lease, task);
             if (response.Finish == ModelFinish.Length || response.Finish == ModelFinish.Refused || response.Finish == ModelFinish.ContentFiltered)
             {
                 Wait(task, turn, WaitReason.ModelLimit, response.Finish.ToString()); await CommitAsync(lease, task).ConfigureAwait(false); return;
             }
-            ToolCallRules.ValidateChoice(request.Options.ToolChoice, response.Message.ToolCalls);
             if (response.Message.ToolCalls.Count == 0 && await YieldForSteeringAsync(task, turn, lease)) return;
-            if ((options.StopWhenUsageUnknown && !task.Budget.Usage.Known) || task.Budget.Usage.TotalTokens >= task.Budget.MaxTokens)
+            if ((options.StopWhenUsageUnknown && !task.Budget.Usage.Known) ||
+                task.Budget.Usage.TotalTokens >= task.Budget.MaxTokens && response.Message.ToolCalls.Count > 0)
             {
                 Wait(task, turn, WaitReason.Budget, task.Budget.Usage.Known ? "token_budget" : "unknown_token_usage"); await CommitAsync(lease, task).ConfigureAwait(false); return;
             }
             if (response.Message.ToolCalls.Count > 0)
             {
-                foreach (var call in response.Message.ToolCalls)
-                    task.Operations.Add(new ToolOperation { TurnId = turn.Id, StepId = step.Id, Call = TaskJson.Clone(call), ClientOwned = turn.Settings.Tools.Any(t => t.Name == call.Name) });
-                await CommitAsync(lease, task).ConfigureAwait(false);
                 continue;
             }
             else if (response.Finish != ModelFinish.Stop)
                 Wait(task, turn, WaitReason.ModelLimit, response.Finish.ToString());
             else
             {
+                turn.ResumeCompletionCandidate = false;
                 if (await FinishCandidateAsync(task, turn, lease, cancellationToken).ConfigureAwait(false)) return;
                 continue;
             }
@@ -504,7 +615,8 @@ namespace MiniHarness.Harness
             {
                 TaskId = task.Id, TurnId = turn?.Id, OperationId = operation?.Id, Sequence = task.Events.Count + 1, Type = type, Detail = detail
             });
-        private static Task CommitAsync(ITaskLease lease, AgentTaskState task) => lease.CommitAsync(task, task.Revision, CancellationToken.None);
+        private Task CommitAsync(ITaskLease lease, AgentTaskState task)
+        { RefreshRecoveryState(task); return lease.CommitAsync(task, task.Revision, CancellationToken.None); }
         public async ValueTask DisposeAsync()
         {
             await StopAdvancementAsync();
@@ -540,6 +652,10 @@ namespace MiniHarness.Harness
             // Preserve fingerprints of pre-extension commands in schema v1.
             var original = new { command.Id, command.TaskId, command.Kind, command.Request, command.ForkedFromResponseId,
                 command.Facts, command.OperationId, command.Approve, command.Results, command.Evidence, command.ReconciledOutcome };
+            if (command.Kind == TaskCommandKind.Recover || command.Kind == TaskCommandKind.CompactContext || command.Kind == TaskCommandKind.ReconcileModelUsage ||
+                command.RecoveryToken != null || command.ModelUsage != null || command.Automatic || command.ResourceReconciliation != null || command.Kind == TaskCommandKind.ReconcileResourceState)
+                return TaskJson.Hash(JsonSerializer.Serialize(new { Version = 3, Original = original, command.ResourceId, command.ChildTaskId,
+                    command.ParentTaskId, command.ChildBudget, command.ResourceInput, command.Wake, command.Steering, command.RecoveryToken, command.ModelUsage, command.Automatic, command.ResourceReconciliation }, TaskJson.Options));
             if (command.Kind == TaskCommandKind.Steer || command.Kind == TaskCommandKind.ResourceWake || command.Kind == TaskCommandKind.WriteResourceInput ||
                 command.Steering != null || command.Wake != null || command.ResourceInput != null)
                 return TaskJson.Hash(JsonSerializer.Serialize(new { Version = 2, Command = original, command.ResourceId,

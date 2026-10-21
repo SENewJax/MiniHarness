@@ -17,9 +17,9 @@ namespace MiniHarness.Harness
         private static bool UncertainResources(AgentTaskState task) =>
             task.ResourceInputs.Any(i => i.Status != "finished" && i.Status != "absent") ||
             task.Resources.Any(r => r.Process != null && !r.Process.TerminationConfirmed && r.State != "running");
-        private static void AddObservation(AgentTaskState task, TaskTurn turn, string text)
+        private static void AddObservation(AgentTaskState task, TaskTurn turn, string text, string source = "runtime_feedback")
         {
-            var entry = new HistoryEntry { TurnId = turn.Id, Message = new Message { Role = "user", Text = text } };
+            var entry = new HistoryEntry { TurnId = turn.Id, Source = source, Message = new Message { Role = "user", Text = text } };
             if (task.Operations.Any(o => o.TurnId == turn.Id && o.Status != OperationStatus.Finished)) task.DeferredMessages.Add(entry);
             else task.History.Add(entry);
         }
@@ -102,10 +102,11 @@ namespace MiniHarness.Harness
             if (turn == null || turn.Status == TurnStatus.Completed)
                 throw new TaskConflictException("Steer requires text and an active turn.");
             bool paused = task.Status == AgentTaskStatus.Paused;
+            turn.ResumeCompletionCandidate = false;
             RejectUnstarted(task, turn); InvalidateWaits(task, turn);
             task.SteeringRevision++;
             task.Facts.Constraints.AddRange(command.Steering!.Constraints.Where(c => !task.Facts.Constraints.Contains(c)));
-            AddObservation(task, turn, command.Steering.Text);
+            AddObservation(task, turn, command.Steering.Text, "steering");
             Emit(task, "SteeringAccepted", turn);
             bool uncertain = UncertainResources(task) || task.Operations.Any(o => o.TurnId == turn.Id && (o.Status == OperationStatus.Unknown || o.Status == OperationStatus.Started));
             if (uncertain) Wait(task, turn, WaitReason.Reconciliation, "unknown_side_effect");

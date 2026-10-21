@@ -22,6 +22,29 @@ namespace MiniHarness.Server
         { this.runtime = runtime; this.model = model; this.server = server; this.logger = logger; }
         public void Map(WebApplication app)
         {
+            app.MapGet("/agent/tasks/{id}/failure", (HttpContext http, string id) => GuardAsync(http, async () =>
+                await http.Response.WriteAsJsonAsync(runtime is ITaskDiagnostics diagnostics ? await diagnostics.ReadFailureAsync(id, http.RequestAborted) : null, TaskJson.Options, http.RequestAborted)));
+            app.MapGet("/agent/tasks/{id}/history/{historyId}", (HttpContext http, string id, string historyId) => GuardAsync(http, async () =>
+            {
+                if (runtime is not ITaskDiagnostics diagnostics || !int.TryParse(http.Request.Query["offset"].FirstOrDefault() ?? "0", out var offset) ||
+                    !int.TryParse(http.Request.Query["limit"].FirstOrDefault() ?? "65536", out var maxBytes)) throw new ArgumentException("Invalid history chunk request.");
+                await http.Response.WriteAsJsonAsync(await diagnostics.ReadHistoryEntryAsync(id, historyId, offset, maxBytes, http.RequestAborted), TaskJson.Options, http.RequestAborted);
+            }));
+            app.MapGet("/agent/tasks/{id}/recovery", (HttpContext http, string id) => GuardAsync(http, async () =>
+                await http.Response.WriteAsJsonAsync((await runtime.GetAsync(id, http.RequestAborted) ?? throw new ArgumentException("Task not found.")).Recovery, TaskJson.Options, http.RequestAborted)));
+            app.MapGet("/agent/tasks/{id}/context", (HttpContext http, string id) => GuardAsync(http, async () =>
+            {
+                var state = await runtime.GetAsync(id, http.RequestAborted) ?? throw new ArgumentException("Task not found.");
+                await http.Response.WriteAsJsonAsync(new { state.ContextMemory, state.ContextDiagnostics, Summaries = state.Compactions.Select(c => new { c.Id, c.Status, c.CoveredCount, c.SourceHash, c.Error }) }, TaskJson.Options, http.RequestAborted);
+            }));
+            app.MapGet("/agent/tasks/{id}/history", (HttpContext http, string id) => GuardAsync(http, async () =>
+            {
+                if (runtime is not ITaskDiagnostics diagnostics || !int.TryParse(http.Request.Query["limit"].FirstOrDefault() ?? "65536", out var maxBytes))
+                    throw new ArgumentException("History diagnostics or limit unavailable.");
+                await http.Response.WriteAsJsonAsync(await diagnostics.ReadHistoryAsync(id, http.Request.Query["after"].FirstOrDefault(), maxBytes, http.RequestAborted), TaskJson.Options, http.RequestAborted);
+            }));
+            app.MapGet("/agent/recovery", (HttpContext http, TaskRecoveryService recovery) => GuardAsync(http, async () =>
+                await http.Response.WriteAsJsonAsync(recovery.Results, TaskJson.Options, http.RequestAborted)));
             app.MapGet("/agent/tasks/{id}/resources/{resourceId}/output", (HttpContext http, string id, string resourceId) => GuardAsync(http, async () =>
             {
                 if (!long.TryParse(http.Request.Query["after"].FirstOrDefault() ?? "0", out var after) ||

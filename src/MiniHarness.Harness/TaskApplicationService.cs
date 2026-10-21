@@ -8,12 +8,21 @@ namespace MiniHarness.Harness
 {
     // One application boundary for protocol and native requests. The runtime
     // owns execution; this service owns host initialization and caller intent.
-    public sealed class TaskApplicationService : ITaskApplicationService, IResourceOutputAccess
+    public sealed class TaskApplicationService : ITaskApplicationService, IResourceOutputAccess, ITaskDiagnostics
     {
         private readonly ITaskRuntime runtime;
         private readonly ITaskInitializer? initializer;
         public TaskApplicationService(ITaskRuntime runtime, ITaskInitializer? initializer = null)
         { this.runtime = runtime; this.initializer = initializer; }
+        public Task<TaskHistoryPage> ReadHistoryAsync(string taskId, string? afterId, int maxBytes, CancellationToken ct)
+            => runtime is ITaskDiagnostics diagnostics ? diagnostics.ReadHistoryAsync(taskId, afterId, maxBytes, ct)
+                : throw new ArgumentException("History diagnostics unavailable.");
+        public Task<TaskHistoryChunk> ReadHistoryEntryAsync(string taskId, string historyId, int offset, int maxBytes, CancellationToken ct)
+            => runtime is ITaskDiagnostics diagnostics ? diagnostics.ReadHistoryEntryAsync(taskId, historyId, offset, maxBytes, ct)
+                : throw new ArgumentException("History diagnostics unavailable.");
+        public Task<TaskExecutionFailure?> ReadFailureAsync(string taskId, CancellationToken ct)
+            => runtime is ITaskDiagnostics diagnostics ? diagnostics.ReadFailureAsync(taskId, ct)
+                : Task.FromResult<TaskExecutionFailure?>(null);
         private TaskCommand Prepare(TaskCommand command)
         {
             var copy = TaskJson.Clone(command);

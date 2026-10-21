@@ -11,7 +11,7 @@ namespace MiniHarness.Abstractions
     public enum EffectState { None, Confirmed, Partial, Unknown }
     public enum ApprovalState { None, Approved, Denied }
     public enum StepStatus { Preparing, Ready, Running, Responded, Interrupted }
-    public enum TaskCommandKind { Start, Input, Approval, ExternalResult, Pause, Cancel, Resume, Evidence, RefreshWorkspace, Reconcile, QueryResource, CancelResource, ReconcileResources, StartChild, CollectChild, WriteResourceInput, ResourceWake, Steer }
+    public enum TaskCommandKind { Start, Input, Approval, ExternalResult, Pause, Cancel, Resume, Evidence, RefreshWorkspace, Reconcile, QueryResource, CancelResource, ReconcileResources, StartChild, CollectChild, WriteResourceInput, ResourceWake, Steer, Recover, CompactContext, ReconcileModelUsage, ReconcileResourceState }
     public enum ResourceAction { Query, Cancel, Reconcile }
 
     public sealed class ModelBinding
@@ -47,6 +47,8 @@ namespace MiniHarness.Abstractions
     }
     public sealed class HistoryEntry
     {
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? Source { get; set; }
         public string Id { get; set; } = "history_" + Guid.NewGuid().ToString("N");
         public string TurnId { get; set; } = "";
         public string? StepId { get; set; }
@@ -67,6 +69,8 @@ namespace MiniHarness.Abstractions
         public int ToolCalls { get; set; }
         public TokenUsage Usage { get; set; } = new TokenUsage();
         public ModelResponse? LastResponse { get; set; }
+        public bool ResumeCompletionCandidate { get; set; }
+        public int? ResponseHistoryCount { get; set; }
     }
     public sealed class CapabilitySnapshot
     {
@@ -85,6 +89,8 @@ namespace MiniHarness.Abstractions
         // Frozen finite model view, separate from task facts and execution history.
         public ModelRequest? PreparedRequest { get; set; }
         public int SteeringRevision { get; set; }
+        public string? ContextMemoryId { get; set; }
+        public string ContextSourceHash { get; set; } = "";
     }
     public sealed class ToolOperation
     {
@@ -173,7 +179,7 @@ namespace MiniHarness.Abstractions
     }
     public sealed class AgentTaskState
     {
-        public const int CurrentSchemaVersion = 1;
+        public const int CurrentSchemaVersion = 2;
         public int SchemaVersion { get; set; } = CurrentSchemaVersion;
         public long Revision { get; set; }
         public string Id { get; set; } = "task_" + Guid.NewGuid().ToString("N");
@@ -198,6 +204,16 @@ namespace MiniHarness.Abstractions
         public List<ResourceInputAction> ResourceInputs { get; set; } = new List<ResourceInputAction>();
         public int SteeringRevision { get; set; }
         public List<HistoryEntry> DeferredMessages { get; set; } = new List<HistoryEntry>();
+        public ContextMemory ContextMemory { get; set; } = new ContextMemory();
+        public ContextDiagnostics ContextDiagnostics { get; set; } = new ContextDiagnostics();
+        public List<CompactionRecord> Compactions { get; set; } = new List<CompactionRecord>();
+        public List<ModelInvocationRecord> ModelInvocations { get; set; } = new List<ModelInvocationRecord>();
+        public bool ModelLedgerInitialized { get; set; }
+        public TokenUsage LegacyUsage { get; set; } = new TokenUsage();
+        public bool LegacyUnknown { get; set; }
+        public int LegacyModelCalls { get; set; }
+        public List<LegacyTurnUsage> LegacyTurns { get; set; } = new List<LegacyTurnUsage>();
+        public RecoveryRecord Recovery { get; set; } = new RecoveryRecord();
     }
     public sealed class TaskResponseReference
     {
@@ -232,6 +248,14 @@ namespace MiniHarness.Abstractions
         public ResourceWake? Wake { get; set; }
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public TaskSteering? Steering { get; set; }
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? RecoveryToken { get; set; }
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public ModelUsageReconciliation? ModelUsage { get; set; }
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+        public bool Automatic { get; set; }
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public ResourceReconciliation? ResourceReconciliation { get; set; }
     }
     public sealed class TaskCommandResult
     {

@@ -53,6 +53,12 @@ namespace MiniHarness.Tests
                     var second = new TaskTurn { Settings = HarnessTests.Request(), Status = TurnStatus.Completed };
                     second.Settings.Messages.Clear(); task.Turns.Add(second);
                     task.History.Add(new HistoryEntry { TurnId = second.Id, Message = new Message { Text = "second input" } });
+                    second.ModelCalls = 1; second.Usage = new TokenUsage { InputTokens = 5, OutputTokens = 3 };
+                    var response = HarnessTests.Answer("second answer"); response.Usage = TaskJson.Clone(second.Usage); second.LastResponse = response;
+                    task.History.Add(new HistoryEntry { TurnId = second.Id, Source = "model", Message = TaskJson.Clone(response.Message) });
+                    task.ModelInvocations.Add(new ModelInvocationRecord { TurnId = second.Id, Purpose = ModelInvocationPurpose.Reasoning,
+                        Status = ModelInvocationStatus.Responded, UsageApplied = true, ResultApplied = true, Request = HarnessTests.Request(),
+                        Response = response, Usage = TaskJson.Clone(second.Usage) });
                     task.Budget.ModelCalls++; task.Budget.Usage.Add(new TokenUsage { InputTokens = 5, OutputTokens = 3 });
                     await lease.CommitAsync(task, 0, CancellationToken.None);
                     await Check.ThrowsAsync<TaskConflictException>(async () =>
