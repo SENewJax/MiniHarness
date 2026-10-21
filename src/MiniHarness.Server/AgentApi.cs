@@ -80,6 +80,8 @@ namespace MiniHarness.Server
                     CancelTaskWhenWaitCancelled = deadline.Options.CancelTaskWhenWaitCancelled
                 }, deadline.Token).ConfigureAwait(false);
                 if (state.TaskId != null) http.Response.Headers["X-Agent-Task-Id"] = state.TaskId;
+                if (state.DeliveryManifestHash != null)
+                { http.Response.Headers["X-Agent-Delivery-Hash"] = state.DeliveryManifestHash; http.Response.Headers["X-Agent-Delivery-Url"] = "/agent/tasks/" + state.TaskId + "/delivery"; }
                 http.Response.Headers["X-Agent-Run-Id"] = state.Id;
                 http.Response.Headers["X-Agent-Status"] = state.Status.ToString();
                 if (state.StopReason != null) http.Response.Headers["X-Agent-Stop-Reason"] = SafeHeader(state.StopReason);

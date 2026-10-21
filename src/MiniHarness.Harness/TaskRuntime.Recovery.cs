@@ -37,12 +37,19 @@ namespace MiniHarness.Harness
                 { report.Classification = RecoveryClassification.Resources; report.Blockers.AddRange(task.Resources.Where(r => !ResourceFinished(r) && r.State != "running").Select(r => r.Id)); }
                 else if (task.Wait == WaitReason.Approval || task.Operations.Any(o => o.Status == OperationStatus.WaitingApproval)) report.Classification = RecoveryClassification.Approval;
                 else if (task.Wait == WaitReason.ExternalResult) report.Classification = RecoveryClassification.ExternalResult;
+                else if (task.Acceptance != null && !Acceptance.AcceptanceEvaluator.Evaluate(task).CanFinalize && task.Wait == WaitReason.Review)
+                    report.Classification = RecoveryClassification.Review;
+                else if (task.Acceptance?.Progress.Stopped == true && !Acceptance.AcceptanceEvaluator.Evaluate(task).CanFinalize)
+                    report.Classification = RecoveryClassification.NoProgress;
+                else if (task.Wait == WaitReason.Infrastructure) report.Classification = RecoveryClassification.Infrastructure;
                 else if (task.Wait == WaitReason.ModelLimit || task.Wait == WaitReason.Evidence) report.Classification = RecoveryClassification.Reconciliation;
                 else if (task.Status == AgentTaskStatus.Paused) { report.Classification = RecoveryClassification.Paused; report.CanResume = true; }
                 else { report.Classification = RecoveryClassification.Ready; report.CanResume = turn != null; report.CanWake = true; }
             }
             if (report.Classification == RecoveryClassification.Paused || report.Classification == RecoveryClassification.Terminal || report.Classification == RecoveryClassification.Input)
                 report.AutomaticAllowed = false;
+            if (task.Acceptance != null)
+                report.Blockers = report.Blockers.Concat(Acceptance.AcceptanceEvaluator.Evaluate(task).Blockers).Distinct().ToList();
             report.ContinuationToken = ContinuationToken(task);
         }
         private static bool HasLocalSettlement(AgentTaskState task, TaskTurn? turn)
@@ -50,6 +57,7 @@ namespace MiniHarness.Harness
             if (turn == null) return false;
             // This admits only already-paid work. Advance still checks budgets before any new model request.
             bool finalResponse = turn.LastResponse?.Finish == ModelFinish.Stop && turn.LastResponse.Message.ToolCalls.Count == 0;
+            if (task.Acceptance != null && finalResponse && Acceptance.AcceptanceEvaluator.Evaluate(task).CanFinalize) return true;
             return finalResponse && (turn.ResumeCompletionCandidate || task.ResourceWaits.Any(w => w.TurnId == turn.Id &&
                     w.CompletionCandidate && (w.Status == "active" || w.Status == "consumed"))) ||
                 task.Budget.Usage.TotalTokens + task.Budget.ReservedTokens < task.Budget.MaxTokens &&
@@ -85,13 +93,16 @@ namespace MiniHarness.Harness
             TaskStateMigration.InitializeLedger(task);
             var report = task.Recovery; report.HostGeneration = HostGeneration; report.CheckedAtUtc = DateTimeOffset.UtcNow;
             report.CheckedRevision = task.Revision; report.Classification = RecoveryClassification.Ready;
+            if (task.Acceptance != null && (delivery?.Authorizer == null || !delivery.Authorizer.ValidSpec(task, task.Facts.AcceptanceSpec!)))
+            { report.Classification = RecoveryClassification.HostAuthorization; report.Blockers = new List<string> { "acceptance_configuration_changed" }; }
             report.AutomaticAllowed = recoveryOptions.Mode == RecoveryMode.Safe;
             if (!BindingCompatible(task.Model)) { report.Classification = RecoveryClassification.ModelConfiguration; report.Blockers = new List<string> { "model_binding_changed" }; }
             if (recoveryAuthorizer != null)
             {
                 var authorization = await recoveryAuthorizer.CheckAsync(TaskJson.Clone(task), TaskJson.Clone(binding), CancellationToken.None);
                 if (!authorization.Allowed) { report.Classification = RecoveryClassification.HostAuthorization; report.Blockers = new List<string> { authorization.Reason }; }
-                else if (authorization.RestrictedFacts != null) task.Facts = TaskJson.Clone(authorization.RestrictedFacts);
+                else if (authorization.RestrictedFacts != null)
+                { task.Facts = TaskJson.Clone(authorization.RestrictedFacts); if (task.Acceptance != null) ApplyRequiredEvidence(task); }
             }
             foreach (var operation in task.Operations.Where(o => o.Status == OperationStatus.Started))
             { operation.Status = OperationStatus.Unknown; operation.Effect = EffectState.Unknown; }
@@ -132,6 +143,9 @@ namespace MiniHarness.Harness
                     catch (Exception error) { resource.State = "unknown"; resource.Result = "Recovery: " + error.GetType().Name; }
                 }
             UpdateUsageKnowledge(task);
+            if (task.Acceptance != null)
+                foreach (var attempt in task.Acceptance.Attempts.Where(a => a.Status == VerificationAttemptStatus.Pending &&
+                    task.Operations.Any(o => o.Id == a.OperationId && o.Status == OperationStatus.Unknown))) attempt.Status = VerificationAttemptStatus.Unknown;
             foreach (var child in task.Children.Where(c => c.Collected && c.Usage?.Usage.Known == false).ToList())
                 try { await CollectChildAsync(task, child.TaskId); } catch (TaskConflictException) { /* Child still busy/unsettled: retain the lower bound. */ }
             if (report.Classification != RecoveryClassification.ModelConfiguration && report.Classification != RecoveryClassification.HostAuthorization && !Terminal(task))

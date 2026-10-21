@@ -4,11 +4,11 @@
 
 MiniHarness 将模型、工具和外部进程接入同一个任务运行内核，提供执行控制、状态记录与证据驱动的完成判定。面向希望理解和构建 Coding Agent 的开发者，也可作为实现自定义 Harness 的参考。
 
-本文介绍 V0～V3 的能力与使用边界。V3 在 V2 基线上增强上下文与宿主恢复，继续使用同一任务运行内核。
+本文介绍 V0～V4 的能力与使用边界。各阶段沿用同一任务运行内核，逐步增强编码、长任务、上下文恢复和可验收交付能力。
 
 > Agent = Model + Harness。模型选择行动，Harness 约束执行并记录真实结果。
 
-[架构总览](docs/design/architecture.md) · [运行内核](docs/design/v0-runtime.md) · [编码闭环](docs/design/v1-coding.md) · [长任务与进程](docs/design/v2-processes.md)
+[架构总览](docs/design/architecture.md) · [运行内核](docs/design/v0-runtime.md) · [编码闭环](docs/design/v1-coding.md) · [长任务与进程](docs/design/v2-processes.md) · [可验收交付](docs/design/v4-delivery.md)
 
 ## 核心能力
 
@@ -18,11 +18,14 @@ MiniHarness 将模型、工具和外部进程接入同一个任务运行内核�
 | 编码闭环 | 工作区内定位和读取、带版本前置条件的编辑、变更账本、构建/测试证据 |
 | 长时间运行 | 受控后台进程、增量输出、stdin、持久等待、自动唤醒与中途纠正 |
 | 上下文与恢复 | 完整交互分组、自动/显式摘要、模型输入重建、重启分类与受控继续，保留原历史和累计成本 |
+| 可验收交付 | 版本化要求、可信验证证据、保护文件、候选审阅、无进展停止及可独立复验的本地交付包 |
 | 协议接入 | Chat Completions、Responses 与原生任务 API；对外协议和上游协议独立选择 |
 
 模型调用、工具执行、资源管理和完成判定共享任务身份与控制规则。Coding 和 Processes 能力由宿主显式开启；程序执行范围由工作区授权和命令 profile 决定。
 
 Context 自动摘要默认关闭；Recovery 默认只分类，不自动花费模型额度。摘要与业务推理共用预算，未知费用和副作用必须核对，摘要不能替代权限或验证证据。
+
+Delivery 默认关闭。启用验收契约的任务，只有要求、当前证据、产物和必要审阅满足后才提交完成；旧任务保持原完成语义。交付限本地封存，不自动发布、部署或推送代码。配置与使用边界见[交付设计](docs/design/v4-delivery.md)。
 
 ## 架构
 

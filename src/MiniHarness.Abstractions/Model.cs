@@ -94,6 +94,8 @@ namespace MiniHarness.Abstractions
 
     public sealed class RunState
     {
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? DeliveryManifestHash { get; set; }
         public string? TaskId { get; set; }
         public string Id { get; set; } = "resp_" + Guid.NewGuid().ToString("N");
         public long CreatedAt { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeSeconds();

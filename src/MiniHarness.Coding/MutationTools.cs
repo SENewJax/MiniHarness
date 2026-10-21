@@ -11,9 +11,10 @@ using MiniHarness.Abstractions;
 namespace MiniHarness.Coding
 {
     // create_file(path, content) — refuses to overwrite an existing file.
-    public sealed class CreateFileTool : CodingToolBase
+    public sealed class CreateFileTool : CodingToolBase, IWorkspaceMutation
     {
         private readonly ChangeLedger ledger;
+        public IEnumerable<string> TargetPaths(JsonElement args) { yield return String(args, "path", "").Replace('\\', '/'); }
         public CreateFileTool(ChangeLedger ledger, WorkspaceOptions? options = null) : base(options)
         {
             this.ledger = ledger;
@@ -101,8 +102,9 @@ namespace MiniHarness.Coding
 
     // apply_patch(path, expected_hash, old_text, new_text)
     // Unique literal match; zero or multiple matches are rejected with no write.
-    public sealed class ApplyPatchTool : CodingToolBase
+    public sealed class ApplyPatchTool : CodingToolBase, IWorkspaceMutation
     {
+        public IEnumerable<string> TargetPaths(JsonElement args) { yield return String(args, "path", "").Replace('\\', '/'); }
         private readonly ChangeLedger ledger;
         public ApplyPatchTool(ChangeLedger ledger, WorkspaceOptions? options = null) : base(options)
         {

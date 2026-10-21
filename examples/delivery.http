@@ -1,0 +1,59 @@
+### Task commands use the same endpoint as V0-V3. Host capabilities default to denied.
+@base = http://localhost:5000
+@task = task_REPLACE_WITH_TASK_ID
+
+### Read current assessment (no model calls)
+GET {{base}}/agent/tasks/{{task}}/acceptance
+
+### Host-controlled import. Use a new ArtifactId for new bytes and a stable LogicalName.
+POST {{base}}/agent/tasks/commands
+Content-Type: application/json
+
+{
+  "kind": "RegisterDeliveryArtifact",
+  "taskId": "{{task}}",
+  "acceptance": {
+    "artifact": {
+      "id": "package-v1",
+      "logicalName": "package",
+      "location": "C:/HOST_ALLOWED_SOURCE/package.zip",
+      "contentHash": "REPLACE_WITH_ACTUAL_SHA256"
+    }
+  }
+}
+
+### Review is bound to the current candidate; it cannot waive automatic checks.
+POST {{base}}/agent/tasks/commands
+Content-Type: application/json
+
+{
+  "kind": "ReviewDelivery",
+  "taskId": "{{task}}",
+  "acceptance": { "review": { "candidateFingerprint": "REPLACE_WITH_CURRENT_FINGERPRINT", "accept": true, "comment": "Reviewed current candidate." } }
+}
+
+### A bounded continuation needs the current stop fingerprint and explicit host permission.
+POST {{base}}/agent/tasks/commands
+Content-Type: application/json
+
+{
+  "kind": "ContinueAfterNoProgress",
+  "taskId": "{{task}}",
+  "acceptance": { "expectedHash": "REPLACE_WITH_STOP_FINGERPRINT", "reason": "New information justifies bounded additional attempts." }
+}
+
+### Resume local sealing after an infrastructure interruption; no extra model quota is granted.
+POST {{base}}/agent/tasks/commands
+Content-Type: application/json
+
+{
+  "kind": "FinalizeDelivery",
+  "taskId": "{{task}}",
+  "acceptance": { "expectedHash": "REPLACE_WITH_CURRENT_CANDIDATE" }
+}
+
+### Metadata preserves historical completion and reports current integrity separately.
+GET {{base}}/agent/tasks/{{task}}/delivery
+
+### Export then unzip; use the manifest hash from the trusted task record for offline verification.
+GET {{base}}/agent/tasks/{{task}}/delivery/bundle

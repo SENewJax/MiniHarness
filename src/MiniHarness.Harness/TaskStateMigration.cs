@@ -11,7 +11,7 @@ namespace MiniHarness.Harness
         public static AgentTaskState Read(JsonElement json)
         {
             if (!json.TryGetProperty("schemaVersion", out var version) || version.ValueKind != JsonValueKind.Number ||
-                (version.GetInt32() != 1 && version.GetInt32() != AgentTaskState.CurrentSchemaVersion))
+                (version.GetInt32() != 1 && version.GetInt32() != 2 && version.GetInt32() != AgentTaskState.CurrentSchemaVersion))
                 throw new InvalidDataException("Unsupported task checkpoint schema version.");
             var task = json.Deserialize<AgentTaskState>(TaskJson.Options) ?? throw new InvalidDataException("Null task checkpoint.");
             if (version.GetInt32() == 1)
@@ -22,6 +22,7 @@ namespace MiniHarness.Harness
                 task.Recovery = new RecoveryRecord(); task.ModelLedgerInitialized = false;
                 InitializeLedger(task);
             }
+            if (version.GetInt32() < 3) { task.SchemaVersion = 3; task.Acceptance = null; task.Facts.AcceptanceSpec = null; }
             Validate(task); PopulateResponseBounds(task); return task;
         }
         private static void PopulateResponseBounds(AgentTaskState task)
@@ -53,6 +54,16 @@ namespace MiniHarness.Harness
         }
         public static void Validate(AgentTaskState task)
         {
+            if ((task.Facts.AcceptanceSpec == null) != (task.Acceptance == null)) throw new InvalidDataException("Acceptance contract/state mismatch.");
+            if (task.Acceptance != null)
+            {
+                Acceptance.AcceptanceBinding.Validate(task.Facts.AcceptanceSpec!);
+                if (task.Acceptance.Attempts.Select(a => a.Id).Distinct().Count() != task.Acceptance.Attempts.Count ||
+                    task.Acceptance.Attempts.Any(a => !Enum.IsDefined(a.Status)) ||
+                    task.Acceptance.Progress.EvaluatedSteps.Distinct().Count() != task.Acceptance.Progress.EvaluatedSteps.Count ||
+                    task.Status == AgentTaskStatus.Completed && (task.Acceptance.Delivery?.Status != DeliveryStatus.Committed || task.Acceptance.Delivery.Manifest == null))
+                    throw new InvalidDataException("Invalid acceptance state or uncommitted delivery completion.");
+            }
             if (task.History == null || task.Turns == null || task.Steps == null || task.Operations == null || task.Budget == null ||
                 task.Compactions == null || task.ModelInvocations == null || task.ContextMemory == null || task.Recovery == null ||
                 task.Facts == null || task.Model == null || task.Receipts == null || task.Resources == null || task.Evidence == null ||

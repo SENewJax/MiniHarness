@@ -20,6 +20,7 @@ namespace MiniHarness.LiveTests
     {
         public static async Task<int> Main(string[] args)
         {
+            if (args.FirstOrDefault() == "--delivery") return await ValidateDeliveryAsync(args.Skip(1).ToArray());
             if (args.FirstOrDefault() == "--runtime") return await ValidateRuntimeAsync(args.Skip(1).ToArray());
             if (args.FirstOrDefault() == "--coding") return await ValidateCodingAsync(args.Skip(1).ToArray());
             if (args.FirstOrDefault() == "--coding-fixture") return await ValidateCodingAsync(new[] { "Offline" });

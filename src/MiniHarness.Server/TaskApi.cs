@@ -22,6 +22,18 @@ namespace MiniHarness.Server
         { this.runtime = runtime; this.model = model; this.server = server; this.logger = logger; }
         public void Map(WebApplication app)
         {
+            app.MapGet("/agent/tasks/{id}/acceptance", (HttpContext http, string id, TaskRuntime kernel) => GuardAsync(http, async () =>
+                await http.Response.WriteAsJsonAsync(await kernel.ReadAcceptanceAsync(id, http.RequestAborted), TaskJson.Options, http.RequestAborted)));
+            app.MapGet("/agent/tasks/{id}/progress", (HttpContext http, string id) => GuardAsync(http, async () =>
+                await http.Response.WriteAsJsonAsync((await runtime.GetAsync(id, http.RequestAborted))?.Acceptance?.Progress, TaskJson.Options, http.RequestAborted)));
+            app.MapGet("/agent/tasks/{id}/delivery", (HttpContext http, string id, TaskRuntime kernel) => GuardAsync(http, async () =>
+            {
+                await http.Response.WriteAsJsonAsync(await kernel.ReadDeliveryAsync(id, http.RequestAborted), TaskJson.Options, http.RequestAborted);
+            }));
+            app.MapGet("/agent/tasks/{id}/delivery/bundle", (HttpContext http, string id, TaskRuntime kernel) => GuardAsync(http, async () =>
+            { byte[] bytes = await kernel.ReadDeliveryBundleAsync(id, http.RequestAborted); http.Response.ContentType = "application/zip"; await http.Response.Body.WriteAsync(bytes, http.RequestAborted); }));
+            app.MapGet("/agent/tasks/{id}/artifacts/{artifactId}", (HttpContext http, string id, string artifactId, TaskRuntime kernel) => GuardAsync(http, async () =>
+            { byte[] bytes = await kernel.ReadDeliveryArtifactAsync(id, artifactId, http.RequestAborted); http.Response.ContentType = "application/octet-stream"; await http.Response.Body.WriteAsync(bytes, http.RequestAborted); }));
             app.MapGet("/agent/tasks/{id}/failure", (HttpContext http, string id) => GuardAsync(http, async () =>
                 await http.Response.WriteAsJsonAsync(runtime is ITaskDiagnostics diagnostics ? await diagnostics.ReadFailureAsync(id, http.RequestAborted) : null, TaskJson.Options, http.RequestAborted)));
             app.MapGet("/agent/tasks/{id}/history/{historyId}", (HttpContext http, string id, string historyId) => GuardAsync(http, async () =>

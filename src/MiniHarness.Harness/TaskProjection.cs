@@ -18,11 +18,16 @@ namespace MiniHarness.Harness
             if (turn.Wait == WaitReason.Budget) status = RunStatus.BudgetExhausted;
             if (task.Status == AgentTaskStatus.Cancelled || task.Status == AgentTaskStatus.Paused) status = RunStatus.Cancelled;
             if (turn.Status == TurnStatus.Failed) status = RunStatus.Failed;
+            var response = TaskJson.Clone(turn.LastResponse);
+            string? deliveryHash = task.Acceptance?.Delivery?.Status == DeliveryStatus.Committed ? task.Acceptance.Delivery.Manifest?.ContentHash : null;
+            if (response != null && deliveryHash != null)
+                response.Message.Text += "\n\nDelivery manifest: /agent/tasks/" + task.Id + "/delivery\nSHA-256: " + deliveryHash;
             return new RunState
             {
                 Id = turn.ResponseId, TaskId = task.Id, CreatedAt = turn.CreatedAt, Status = status, Request = request,
+                DeliveryManifestHash = deliveryHash,
                 StopReason = turn.StopReason, ModelCalls = turn.ModelCalls, ToolCalls = turn.ToolCalls,
-                Usage = TaskJson.Clone(turn.Usage), LastResponse = TaskJson.Clone(turn.LastResponse),
+                Usage = TaskJson.Clone(turn.Usage), LastResponse = response,
                 Executions = task.Operations.Where(o => o.TurnId == turn.Id &&
                     (o.Status == OperationStatus.Started || o.Status == OperationStatus.Finished || o.Status == OperationStatus.Unknown)).Select(o => new ToolExecution
                 {

@@ -37,7 +37,7 @@ namespace MiniHarness.Tests
                 node.AsObject().Remove("modelLedgerInitialized"); node.AsObject().Remove("recovery"); node.AsObject().Remove("contextMemory");
                 string path = Path.Combine(root, original.Id + ".json"); string text = node.ToJsonString(); await File.WriteAllTextAsync(path, text);
                 var store = new FileTaskStore(root); var migrated = (await store.LoadAsync(original.Id, default))!;
-                Check.Equal(text, await File.ReadAllTextAsync(path)); Check.Equal(2, migrated.SchemaVersion);
+                Check.Equal(text, await File.ReadAllTextAsync(path)); Check.Equal(AgentTaskState.CurrentSchemaVersion, migrated.SchemaVersion);
                 Check.Equal(original.History.Single().Id, migrated.History.Single().Id); Check.Equal("unchanged", migrated.Receipts.Single().Fingerprint);
                 Check.Equal(7, migrated.LegacyModelCalls); Check.Equal(28L, migrated.LegacyUsage.TotalTokens); Check.True(migrated.LegacyUnknown);
                 await using (var lease = await store.AcquireAsync(original.Id, default)) await lease.CommitAsync(migrated, 3, default);

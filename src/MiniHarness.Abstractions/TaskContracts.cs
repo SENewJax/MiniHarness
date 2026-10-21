@@ -90,6 +90,7 @@ namespace MiniHarness.Abstractions
     }
     public sealed class TaskCompletionVerdict
     {
+        public AcceptanceAssessment? Assessment { get; set; }
         public bool CompleteTask { get; set; }
         public bool CompleteTurn { get; set; }
         public bool CanContinue { get; set; }

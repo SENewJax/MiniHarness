@@ -24,6 +24,9 @@ namespace MiniHarness.Tests
             V3CompactionTests.Register(tests);
             V3RecoveryTests.Register(tests);
             V3ConsistencyTests.Register(tests);
+            V4Tests.Register(tests);
+            V4BoundaryTests.Register(tests);
+            V4IntegrationTests.Register(tests);
             HttpTests.Register(tests);
             TaskStageTests.Register(tests);
             ConsistencyTests.Register(tests);

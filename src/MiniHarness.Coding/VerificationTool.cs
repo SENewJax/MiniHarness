@@ -38,7 +38,7 @@ namespace MiniHarness.Coding
     /// a real EvidenceRecord bound to the resulting revision. A non-zero exit code
     /// is a model-visible verification failure, not a task-fatal exception.
     /// </summary>
-    public sealed class VerificationTool : CodingToolBase, IToolTimeout, IVersionedTool
+    public sealed class VerificationTool : CodingToolBase, IToolTimeout, IVersionedTool, IVerificationProducer
     {
         private readonly IReadOnlyDictionary<string, VerificationProfile> profiles;
         private readonly ProcessRunner runner;
@@ -58,6 +58,10 @@ namespace MiniHarness.Coding
         }
 
         public int TimeoutSeconds => !profiles.Any() ? 60 : profiles.Values.Max(p => p.TimeoutSeconds) + 15;
+        public string? Profile(ToolCall call)
+        { using var json = JsonDocument.Parse(call.Arguments); return json.RootElement.TryGetProperty("profile", out var name) ? name.GetString() : null; }
+        public string Fingerprint(string profile) => profiles.TryGetValue(profile, out var value)
+            ? WorkspaceAccess.HashBytes(JsonSerializer.SerializeToUtf8Bytes(value)) : "unregistered";
 
         // Changing any host command template moves this version, which the runtime
         // already includes in the capability snapshot: stale operations are invalidated.
@@ -141,6 +145,7 @@ namespace MiniHarness.Coding
             var evidence = new EvidenceRecord
             {
                 Requirement = VerificationRequirement(name),
+                VerifierFingerprint = Fingerprint(name),
                 TaskId = "", OperationId = "",
                 WorkspaceRevision = after,
                 Passed = passed,

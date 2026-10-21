@@ -6,12 +6,12 @@ namespace MiniHarness.Abstractions
 {
     public enum AgentTaskStatus { Ready, Running, Waiting, Paused, Completed, Cancelled, Failed }
     public enum TurnStatus { Ready, Running, Waiting, Completed, Interrupted, Failed }
-    public enum WaitReason { None, Input, Approval, ExternalResult, Reconciliation, Evidence, Budget, ModelLimit, CapabilityChanged, Resource }
+    public enum WaitReason { None, Input, Approval, ExternalResult, Reconciliation, Evidence, Budget, ModelLimit, CapabilityChanged, Resource, Review, NoProgress, Infrastructure }
     public enum OperationStatus { Proposed, WaitingApproval, Started, Finished, Unknown }
     public enum EffectState { None, Confirmed, Partial, Unknown }
     public enum ApprovalState { None, Approved, Denied }
     public enum StepStatus { Preparing, Ready, Running, Responded, Interrupted }
-    public enum TaskCommandKind { Start, Input, Approval, ExternalResult, Pause, Cancel, Resume, Evidence, RefreshWorkspace, Reconcile, QueryResource, CancelResource, ReconcileResources, StartChild, CollectChild, WriteResourceInput, ResourceWake, Steer, Recover, CompactContext, ReconcileModelUsage, ReconcileResourceState }
+    public enum TaskCommandKind { Start, Input, Approval, ExternalResult, Pause, Cancel, Resume, Evidence, RefreshWorkspace, Reconcile, QueryResource, CancelResource, ReconcileResources, StartChild, CollectChild, WriteResourceInput, ResourceWake, Steer, Recover, CompactContext, ReconcileModelUsage, ReconcileResourceState, AmendAcceptanceSpec, BeginVerification, SubmitVerification, ReconcileVerification, ReviewDelivery, ContinueAfterNoProgress, FinalizeDelivery, RegisterDeliveryArtifact, VerifyDelivery }
     public enum ResourceAction { Query, Cancel, Reconcile }
 
     public sealed class ModelBinding
@@ -28,6 +28,8 @@ namespace MiniHarness.Abstractions
     }
     public sealed class TaskFacts
     {
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public AcceptanceSpec? AcceptanceSpec { get; set; }
         public string Goal { get; set; } = "";
         public List<string> Constraints { get; set; } = new List<string>();
         public WorkspaceScope Workspace { get; set; } = new WorkspaceScope();
@@ -130,6 +132,14 @@ namespace MiniHarness.Abstractions
     }
     public sealed class ArtifactReference
     {
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? BlobHash { get; set; }
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? LogicalName { get; set; }
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public long? Generation { get; set; }
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public long? Length { get; set; }
         public string Id { get; set; } = "";
         public string OwnerTaskId { get; set; } = "";
         public string Location { get; set; } = "";
@@ -137,6 +147,8 @@ namespace MiniHarness.Abstractions
     }
     public sealed class EvidenceRecord
     {
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? VerifierFingerprint { get; set; }
         public string Id { get; set; } = "evidence_" + Guid.NewGuid().ToString("N");
         public string Requirement { get; set; } = "";
         public string TaskId { get; set; } = "";
@@ -179,7 +191,9 @@ namespace MiniHarness.Abstractions
     }
     public sealed class AgentTaskState
     {
-        public const int CurrentSchemaVersion = 2;
+        public const int CurrentSchemaVersion = 3;
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public AcceptanceState? Acceptance { get; set; }
         public int SchemaVersion { get; set; } = CurrentSchemaVersion;
         public long Revision { get; set; }
         public string Id { get; set; } = "task_" + Guid.NewGuid().ToString("N");
@@ -227,6 +241,8 @@ namespace MiniHarness.Abstractions
     }
     public sealed class TaskCommand
     {
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public AcceptanceCommand? Acceptance { get; set; }
         public string Id { get; set; } = Guid.NewGuid().ToString("N");
         public string? TaskId { get; set; }
         public TaskCommandKind Kind { get; set; }

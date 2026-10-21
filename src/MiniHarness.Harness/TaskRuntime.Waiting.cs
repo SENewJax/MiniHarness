@@ -105,6 +105,7 @@ namespace MiniHarness.Harness
             turn.ResumeCompletionCandidate = false;
             RejectUnstarted(task, turn); InvalidateWaits(task, turn);
             task.SteeringRevision++;
+            if (task.Acceptance != null) { task.Acceptance.Candidate = null; task.Acceptance.Delivery = null; }
             task.Facts.Constraints.AddRange(command.Steering!.Constraints.Where(c => !task.Facts.Constraints.Contains(c)));
             AddObservation(task, turn, command.Steering.Text, "steering");
             Emit(task, "SteeringAccepted", turn);

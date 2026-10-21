@@ -142,9 +142,9 @@ namespace MiniHarness.Harness
                 TaskStateMigration.Validate(state);
                 string checkpointPath = Path.Combine(owner.directory, id + ".json");
                 using (var source = await owner.ReadIfExistsAsync(checkpointPath, cancellationToken).ConfigureAwait(false))
-                    if (source != null && source.RootElement.GetProperty("schemaVersion").GetInt32() == 1)
+                    if (source != null && source.RootElement.GetProperty("schemaVersion").GetInt32() < AgentTaskState.CurrentSchemaVersion)
                     {
-                        string backup = checkpointPath + ".v1.bak";
+                        string backup = checkpointPath + ".v" + source.RootElement.GetProperty("schemaVersion").GetInt32() + ".bak";
                         if (!File.Exists(backup))
                         {
                             string pendingBackup = backup + "." + Guid.NewGuid().ToString("N") + ".tmp";

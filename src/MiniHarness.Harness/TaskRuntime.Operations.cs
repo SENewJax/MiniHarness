@@ -67,6 +67,35 @@ namespace MiniHarness.Harness
                     Workspace = TaskJson.Clone(step.Capabilities.Workspace), Capabilities = TaskJson.Clone(step.Capabilities), Approval = operation.Approval
                 };
                 bool registered = tools.TryGet(operation.Call.Name, out var tool);
+                if (task.Acceptance != null)
+                {
+                    if (!task.Budget.Usage.Known || task.Budget.Usage.TotalTokens + task.Budget.ReservedTokens >= task.Budget.MaxTokens)
+                    { Wait(task, turn, WaitReason.Budget, "tool_token_budget"); await CommitAsync(lease, task); return false; }
+                    await CheckProtectionAsync(task, ct);
+                    if (registered && tool is IWorkspaceMutation mutation)
+                    {
+                        bool forbidden;
+                        try
+                        {
+                            using var arguments = JsonDocument.Parse(operation.Call.Arguments);
+                            forbidden = mutation.TargetPaths(arguments.RootElement).Select(Delivery.SafeFiles.Relative).Any(path =>
+                                task.Acceptance.Protection.Files.Keys.Any(p => p.Equals(path, StringComparison.OrdinalIgnoreCase)) ||
+                                task.Facts.AcceptanceSpec!.ProtectedPaths.Any(p => Delivery.SafeFiles.Matches(path, p)) &&
+                                !task.Facts.AcceptanceSpec.AllowNewFilesUnder.Any(p => Delivery.SafeFiles.Matches(path, p)));
+                        }
+                        catch (Exception error) when (error is JsonException || error is ArgumentException) { forbidden = true; }
+                        if (forbidden) { FinishOperation(task, turn, operation, new ToolOutcome { Status = ToolCallStatus.Rejected, Output = "Protected file mutation rejected." }); await CommitAsync(lease, task); continue; }
+                        if (delivery!.Changes != null)
+                        {
+                            task.Acceptance.ChangeConflicts = (await delivery.Changes.FreezeAsync(TaskJson.Clone(task), ct)).Conflicts;
+                            if (task.Acceptance.ChangeConflicts.Count > 0)
+                            {
+                                FinishOperation(task, turn, operation, new ToolOutcome { Status = ToolCallStatus.Rejected, Output = "Agent ledger conflicts with external edits; reconcile ownership before editing." });
+                                Wait(task, turn, WaitReason.Reconciliation, "change_set_conflict"); await CommitAsync(lease, task); return false;
+                            }
+                        }
+                    }
+                }
                 var admission = registered ? await policy.CheckAsync(TaskJson.Clone(operation.Call), TaskJson.Clone(context), ct).ConfigureAwait(false)
                     : new ToolAdmission { Reason = "Unknown tool: " + operation.Call.Name };
                 if (operation.Approval == ApprovalState.Denied) admission = new ToolAdmission { Reason = "Approval denied." };
@@ -77,12 +106,25 @@ namespace MiniHarness.Harness
                     await CommitAsync(lease, task).ConfigureAwait(false); return false;
                 }
                 if (await YieldForSteeringAsync(task, turn, lease)) return false;
+                if (task.Acceptance != null && admission.Allowed && tool is IVerificationProducer producer)
+                {
+                    string? profile;
+                    try { profile = producer.Profile(operation.Call); }
+                    catch (Exception error) when (error is JsonException || error is ArgumentException)
+                    { FinishOperation(task, turn, operation, new ToolOutcome { Status = ToolCallStatus.Rejected, Output = "Invalid verification arguments." }); await CommitAsync(lease, task); continue; }
+                    foreach (var criterion in task.Facts.AcceptanceSpec!.Criteria.Where(c => c.Kind == CriterionKind.VerificationProfile && c.Profile == profile))
+                    {
+                        if (criterion.VerifierFingerprint != producer.Fingerprint(profile!)) throw new TaskConflictException("Verifier configuration changed; amend acceptance explicitly.");
+                        Acceptance.EvidenceAdmission.Begin(task, criterion.Id, operation.Id + ":" + criterion.Id, operation.Id);
+                    }
+                }
                 operation.Status = OperationStatus.Started; task.Budget.ToolCalls++; turn.ToolCalls++;
                 Emit(task, "OperationStarted", turn, operation.Call.Name, operation);
                 await CommitAsync(lease, task).ConfigureAwait(false);
                 FaultInjection?.Invoke("operation_started");
                 var outcome = admission.Allowed ? await executor.ExecuteAsync(tool!, TaskJson.Clone(operation.Call), context, ct).ConfigureAwait(false)
                     : new ToolOutcome { Status = ToolCallStatus.Rejected, Output = admission.Reason, Effect = EffectState.None };
+                if (task.Acceptance != null) { await CheckProtectionAsync(task, ct); await AcceptToolEvidenceAsync(task, operation, outcome, ct); }
                 if (outcome.WaitRequest != null)
                 {
                     var waitingResource = task.Resources.Concat(outcome.Resources).SingleOrDefault(r => r.Id == outcome.WaitRequest.ResourceId);

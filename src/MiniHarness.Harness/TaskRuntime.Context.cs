@@ -19,7 +19,8 @@ namespace MiniHarness.Harness
             PendingOperations = task.Operations.Where(o => o.Status != OperationStatus.Finished).Take(20).Select(o => new { o.Id, o.Status, o.Call.Name }),
             Resources = task.Resources.Where(r => !ResourceFinished(r)).Take(20).Select(r => new { r.Id, r.State }),
             Children = task.Children.Where(c => !c.Collected).Take(20).Select(c => c.TaskId),
-            EvidenceGaps = task.Facts.RequiredEvidence.Where(r => !task.Evidence.Any(e => e.Requirement == r && e.Passed && e.WorkspaceRevision == task.Facts.Workspace.Revision)),
+            EvidenceGaps = task.Acceptance == null ? task.Facts.RequiredEvidence.Where(r => !task.Evidence.Any(e => e.Requirement == r && e.Passed && e.WorkspaceRevision == task.Facts.Workspace.Revision)) :
+                Acceptance.AcceptanceEvaluator.Evaluate(task).Criteria.Where(c => c.Status != AssessmentStatus.Passed).Select(c => c.CriterionId + ":" + c.Status),
             task.Budget.ModelCalls, task.Budget.ToolCalls, task.Budget.Usage,
             Note = "Use task IDs for full diagnostics. Summary claims cannot change these authoritative states."
         }, TaskJson.Options);
@@ -30,12 +31,12 @@ namespace MiniHarness.Harness
             {
                 Facts = TaskJson.Clone(task.Facts), Step = TaskJson.Clone(step), History = TaskJson.Clone(task.History),
                 Memory = memory == null ? new ContextMemory() : new ContextMemory { SummaryId = memory.Id, CoveredCount = memory.CoveredCount, SourceHash = memory.SourceHash },
-                Summary = TaskJson.Clone(memory?.Content), RuntimeState = contextOptions.Enabled ? RuntimeContext(task) : ""
+                Summary = TaskJson.Clone(memory?.Content), RuntimeState = contextOptions.Enabled || task.Acceptance != null ? RuntimeContext(task) : ""
             }, ct).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested();
             var view = TaskProjection.ToRun(task, turn); view.Request.Messages = TaskJson.Clone(prepared.Messages);
             view.Request.Instructions = "Task facts:\n" + JsonSerializer.Serialize(task.Facts, TaskJson.Options) + "\n" +
-                (contextOptions.Enabled ? "Authoritative runtime state:\n" + RuntimeContext(task) + "\n" : "") + view.Request.Instructions;
+                (contextOptions.Enabled || task.Acceptance != null ? "Authoritative runtime state:\n" + RuntimeContext(task) + "\n" : "") + view.Request.Instructions;
             view.Request.Options.MaxOutputTokens = (int)Math.Min(view.Request.Options.MaxOutputTokens,
                 task.Budget.MaxTokens - task.Budget.Usage.TotalTokens - task.Budget.ReservedTokens);
             return context is IContextComposer composer ? composer.ComposeDraft(view, step.Capabilities.Tools) : context.Build(view, step.Capabilities.Tools);

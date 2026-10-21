@@ -12,7 +12,7 @@ namespace MiniHarness.Harness
         private async Task<AgentTaskState> NewTaskAsync(string id, TaskCommand command)
         {
             var task = NewTask(id, command);
-            if (command.ParentTaskId == null) return task;
+            if (command.ParentTaskId == null) { await InitializeAcceptanceAsync(task); return task; }
             var parent = await store.LoadAsync(command.ParentTaskId, CancellationToken.None).ConfigureAwait(false);
             var link = parent?.Children.SingleOrDefault(c => c.TaskId == id && c.StartCommandId == command.Id && !c.Collected);
             if (link == null || parent!.Status == AgentTaskStatus.Cancelled || JsonSerializer.Serialize(command.Request, TaskJson.Options) != JsonSerializer.Serialize(link.Request, TaskJson.Options))
@@ -20,11 +20,14 @@ namespace MiniHarness.Harness
             task.ParentTaskId = parent!.Id;
             task.Facts = TaskJson.Clone(link.Facts);
             task.Budget = TaskJson.Clone(link.Allocation);
+            await InitializeAcceptanceAsync(task);
             return task;
         }
         private void ReserveChild(AgentTaskState task, TaskCommand command)
         {
-            if (task.Turns.LastOrDefault()?.Status != TurnStatus.Completed)
+            bool acceptanceBoundary = task.Acceptance != null && task.Status == AgentTaskStatus.Waiting && task.Wait == WaitReason.Evidence &&
+                !task.Acceptance.Progress.Stopped && !task.Operations.Any(o => o.Status != OperationStatus.Finished);
+            if (task.Turns.LastOrDefault()?.Status != TurnStatus.Completed && !acceptanceBoundary)
                 throw new TaskConflictException("Create children at a completed turn boundary.");
             var allocation = command.ChildBudget ?? throw new ArgumentException("Child budget required.");
             if (allocation.MaxModelCalls < 1 || allocation.MaxToolCalls < 0 || allocation.MaxTokens < 1 || !task.Budget.Usage.Known ||

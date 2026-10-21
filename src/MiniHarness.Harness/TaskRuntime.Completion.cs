@@ -20,7 +20,10 @@ namespace MiniHarness.Harness
         private async Task<bool> FinishCandidateAsync(AgentTaskState task, TaskTurn turn, ITaskLease lease, CancellationToken ct)
         {
             await RefreshWorkspaceAsync(task, turn, ct).ConfigureAwait(false);
-            var verdict = await completion.EvaluateAsync(TaskJson.Clone(task), TaskJson.Clone(turn.LastResponse!), ct).ConfigureAwait(false);
+            TaskCompletionVerdict verdict;
+            try { verdict = task.Acceptance == null ? await completion.EvaluateAsync(TaskJson.Clone(task), TaskJson.Clone(turn.LastResponse!), ct).ConfigureAwait(false) : await AssessDeliveryAsync(task, turn, ct); }
+            catch (Exception error) when (task.Acceptance != null && (error is System.IO.IOException || error is UnauthorizedAccessException))
+            { Wait(task, turn, WaitReason.Infrastructure, error.GetType().Name); await CommitAsync(lease, task); return true; }
             if (verdict.CompleteTask)
             {
                 foreach (var resource in task.Resources.Where(r => !ResourceFinished(r)).ToList())
@@ -43,6 +46,7 @@ namespace MiniHarness.Harness
                 Wait(task, turn, WaitReason.ExternalResult, "outstanding_child_tasks");
                 await CommitAsync(lease, task).ConfigureAwait(false); return true;
             }
+            if (verdict.CompleteTask && task.Acceptance != null) return await FinalizeDeliveryAsync(task, turn, lease, ct);
             if (verdict.CompleteTurn || verdict.CompleteTask)
             {
                 if (await YieldForSteeringAsync(task, turn, lease)) return true;

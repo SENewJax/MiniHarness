@@ -21,6 +21,8 @@ namespace MiniHarness.Server
     {
         public static void Main(string[] args)
         {
+            if (args.Length == 4 && args[0] == "--verify-delivery" && args[2] == "--expected-manifest-hash")
+            { MiniHarness.Harness.Delivery.DeliveryManifestBuilder.Verify(args[1], args[3], System.Threading.CancellationToken.None).GetAwaiter().GetResult(); Console.WriteLine("Delivery integrity and acceptance records verified."); return; }
             Build(args).Run();
         }
         public static WebApplication Build(string[] args, Action<WebApplicationBuilder>? configure) => Build(args, configure, null);
@@ -44,6 +46,8 @@ namespace MiniHarness.Server
             var processOptions = builder.Configuration.GetSection("Processes").Get<ProcessServerOptions>() ?? new ProcessServerOptions();
             var contextOptions = builder.Configuration.GetSection("Context").Get<ContextOptions>() ?? new ContextOptions(); contextOptions.Validate();
             var recoveryOptions = builder.Configuration.GetSection("Recovery").Get<RecoveryServerOptions>() ?? new RecoveryServerOptions(); recoveryOptions.Policy().Validate();
+            var deliveryOptions = builder.Configuration.GetSection("Delivery").Get<DeliveryServerOptions>() ?? new DeliveryServerOptions();
+            builder.Services.AddSingleton(deliveryOptions);
             builder.Services.AddSingleton(contextOptions); builder.Services.AddSingleton(recoveryOptions);
             builder.Services.AddSingleton(processOptions);
             server.Validate(); model.Validate(); harness.Validate();
@@ -105,6 +109,25 @@ namespace MiniHarness.Server
             // The workspace gate and verification tool must hash the workspace with
             // exactly the same rules, so they share one revision provider instance.
             IWorkspaceRevisionProvider revisionProvider = coding?.Revision ?? new DirectoryWorkspaceRevision();
+            MiniHarness.Harness.Delivery.DeliveryServices? delivery = null;
+            if (deliveryOptions.Enabled)
+            {
+                deliveryOptions.Limits.Validate();
+                foreach (var criterion in deliveryOptions.Template.Criteria.Where(c => c.Kind == CriterionKind.VerificationProfile))
+                    criterion.VerifierFingerprint = coding?.Verification.Fingerprint(criterion.Profile) ?? throw new ArgumentException("V4 verification requires Coding profiles.");
+                deliveryOptions.Template.PolicyVersion = TaskJson.Hash(System.Text.Json.JsonSerializer.Serialize(new { Contract = MiniHarness.Harness.Acceptance.AcceptanceBinding.SpecHash(deliveryOptions.Template), deliveryOptions.Limits,
+                    deliveryOptions.Actor, deliveryOptions.AllowReview, deliveryOptions.AllowAmendment, deliveryOptions.AllowContinue,
+                    deliveryOptions.AllowExternalEvidence, deliveryOptions.AllowArtifactImport }, TaskJson.Options));
+                MiniHarness.Harness.Acceptance.AcceptanceBinding.Validate(deliveryOptions.Template);
+                string deliveryRoot = Path.GetFullPath(Path.IsPathRooted(deliveryOptions.Directory) ? deliveryOptions.Directory : Path.Combine(builder.Environment.ContentRootPath, deliveryOptions.Directory));
+                if (server.WorkspaceRoot.Length > 0 && (deliveryRoot == Path.GetFullPath(server.WorkspaceRoot) || deliveryRoot.StartsWith(Path.TrimEndingDirectorySeparator(Path.GetFullPath(server.WorkspaceRoot)) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)))
+                    throw new ArgumentException("Delivery store must be outside the workspace.");
+                delivery = new MiniHarness.Harness.Delivery.DeliveryServices { Options = deliveryOptions.Limits,
+                    Authorizer = new HostAcceptancePolicy(deliveryOptions), Changes = coding == null ? null : new DeliveryChangeSetProvider(coding.Ledger,
+                        new WorkspaceOptions { IgnoredDirectories = new WorkspaceOptions().IgnoredDirectories.Concat(codingOptions.IgnoredDirectories).Distinct(StringComparer.OrdinalIgnoreCase).ToArray() }),
+                    Artifacts = new MiniHarness.Harness.Delivery.FileArtifactStore(deliveryRoot, new[] { codingOptions.ResolveArtifactRoot(builder.Environment.ContentRootPath), server.WorkspaceRoot }.Where(p => p.Length > 0), deliveryOptions.Limits) };
+                builder.Services.AddSingleton(delivery);
+            }
             ITaskCompletionPolicy taskCompletion = coding != null
                 ? new CodingRoutingPolicy(new EvidenceCompletionPolicy())
                 : new EvidenceCompletionPolicy();
@@ -122,7 +145,7 @@ namespace MiniHarness.Server
                 completion: taskCompletion, workspaceRevision: revisionProvider,
                 resourceManagers: services.GetServices<IResourceManager>(), executionFailed: (id, error) =>
                     services.GetRequiredService<ILogger<TaskRuntime>>().LogError(error, "Task {TaskId} execution failed after acceptance.", id),
-                contextOptions: contextOptions, recoveryOptions: recoveryOptions.Policy(), recoveryAuthorizer: services.GetRequiredService<IRecoveryAuthorizer>()));
+                contextOptions: contextOptions, recoveryOptions: recoveryOptions.Policy(), recoveryAuthorizer: services.GetRequiredService<IRecoveryAuthorizer>(), delivery: delivery));
             builder.Services.AddSingleton<ITaskInitializer, HostTaskInitializer>();
             builder.Services.AddSingleton<IRecoveryAuthorizer, HostRecoveryAuthorizer>();
             builder.Services.AddSingleton<TaskApplicationService>(services => new TaskApplicationService(

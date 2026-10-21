@@ -50,14 +50,23 @@ namespace MiniHarness.Harness
                 resourceManagers, executionFailed, null, null, null, null) { }
 
         public TaskRuntime(IModelProvider model, ITaskStore store, HarnessOptions options, ModelBinding binding,
+            IContextBuilder? context, IToolRegistry? tools, IToolPolicy? toolPolicy, IContextualToolPolicy? policy,
+            IToolExecutor? executor, IContextPreparation? preparation, ITaskCompletionPolicy? completion,
+            IWorkspaceRevisionProvider? workspaceRevision, IEnumerable<IResourceManager>? resourceManagers, Action<string, Exception>? executionFailed,
+            ContextOptions? contextOptions, RecoveryOptions? recoveryOptions, IRecoveryAuthorizer? recoveryAuthorizer, ISummaryGenerator? summaryGenerator)
+            : this(model, store, options, binding, context, tools, toolPolicy, policy, executor, preparation, completion,
+                workspaceRevision, resourceManagers, executionFailed, contextOptions, recoveryOptions, recoveryAuthorizer, summaryGenerator, null) { }
+
+        public TaskRuntime(IModelProvider model, ITaskStore store, HarnessOptions options, ModelBinding binding,
             IContextBuilder? context = null, IToolRegistry? tools = null, IToolPolicy? toolPolicy = null,
             IContextualToolPolicy? policy = null, IToolExecutor? executor = null,
             IContextPreparation? preparation = null, ITaskCompletionPolicy? completion = null, IWorkspaceRevisionProvider? workspaceRevision = null,
             IEnumerable<IResourceManager>? resourceManagers = null, Action<string, Exception>? executionFailed = null,
             ContextOptions? contextOptions = null, RecoveryOptions? recoveryOptions = null, IRecoveryAuthorizer? recoveryAuthorizer = null,
-            ISummaryGenerator? summaryGenerator = null)
+            ISummaryGenerator? summaryGenerator = null, Delivery.DeliveryServices? delivery = null)
         {
-            options.Validate(); this.model = model; this.store = store;
+            options.Validate(); this.model = model; this.store = store; this.delivery = delivery;
+            delivery?.Options.Validate();
             this.options = TaskJson.Clone(options); this.binding = TaskJson.Clone(binding);
             this.context = context ?? new ContextBuilder(this.options, model as IModelRequestSizer);
             this.contextOptions = TaskJson.Clone(contextOptions ?? new ContextOptions()); this.contextOptions.Validate();
@@ -231,14 +240,14 @@ namespace MiniHarness.Harness
                     await RecoverTaskAsync(task, lease, command.Kind == TaskCommandKind.Recover);
                 bool terminal = task.Status == AgentTaskStatus.Completed || task.Status == AgentTaskStatus.Cancelled || task.Status == AgentTaskStatus.Failed;
                 if (terminal && !(command.Kind == TaskCommandKind.Cancel && task.Status == AgentTaskStatus.Cancelled) && command.Kind != TaskCommandKind.Reconcile &&
-                    command.Kind != TaskCommandKind.QueryResource && command.Kind != TaskCommandKind.CancelResource && command.Kind != TaskCommandKind.ReconcileResources && command.Kind != TaskCommandKind.CollectChild && command.Kind != TaskCommandKind.ResourceWake && command.Kind != TaskCommandKind.Recover && command.Kind != TaskCommandKind.ReconcileModelUsage && command.Kind != TaskCommandKind.ReconcileResourceState)
+                    command.Kind != TaskCommandKind.QueryResource && command.Kind != TaskCommandKind.CancelResource && command.Kind != TaskCommandKind.ReconcileResources && command.Kind != TaskCommandKind.CollectChild && command.Kind != TaskCommandKind.ResourceWake && command.Kind != TaskCommandKind.Recover && command.Kind != TaskCommandKind.ReconcileModelUsage && command.Kind != TaskCommandKind.ReconcileResourceState && command.Kind != TaskCommandKind.VerifyDelivery && command.Kind != TaskCommandKind.FinalizeDelivery && command.Kind != TaskCommandKind.ReviewDelivery)
                     throw new TaskConflictException("Terminal task cannot be advanced.");
                 bool controlOnly = command.Kind == TaskCommandKind.QueryResource || command.Kind == TaskCommandKind.CancelResource ||
                     command.Kind == TaskCommandKind.ReconcileResources || command.Kind == TaskCommandKind.WriteResourceInput ||
                     command.Kind == TaskCommandKind.Pause || command.Kind == TaskCommandKind.Cancel || command.Kind == TaskCommandKind.Recover || command.Kind == TaskCommandKind.ReconcileModelUsage || command.Kind == TaskCommandKind.Reconcile || command.Kind == TaskCommandKind.ReconcileResourceState;
                 if (!controlOnly && !BindingCompatible(task.Model))
                     throw new TaskConflictException("Task model/protocol binding differs from this runtime.");
-                if (!controlOnly && task.Recovery.Classification == RecoveryClassification.HostAuthorization)
+                if (!controlOnly && task.Recovery.Classification == RecoveryClassification.HostAuthorization && command.Kind != TaskCommandKind.AmendAcceptanceSpec)
                     throw new TaskConflictException("Task authorization differs from this host: " + string.Join(",", task.Recovery.Blockers));
                 if (!controlOnly) task.Model = TaskJson.Clone(binding);
                 TaskTurn? turn = task.Turns.LastOrDefault();
@@ -246,6 +255,25 @@ namespace MiniHarness.Harness
                 bool compactOnly = false;
                 switch (command.Kind)
                 {
+                    case TaskCommandKind.AmendAcceptanceSpec:
+                    case TaskCommandKind.BeginVerification:
+                    case TaskCommandKind.SubmitVerification:
+                    case TaskCommandKind.ReconcileVerification:
+                    case TaskCommandKind.ReviewDelivery:
+                    case TaskCommandKind.ContinueAfterNoProgress:
+                    case TaskCommandKind.RegisterDeliveryArtifact:
+                    case TaskCommandKind.FinalizeDelivery:
+                    case TaskCommandKind.VerifyDelivery:
+                        if (terminal)
+                        {
+                            if (command.Kind == TaskCommandKind.VerifyDelivery) await ExecuteAcceptanceCommandAsync(task, command, lease, CancellationToken.None);
+                            else if (task.Acceptance?.Delivery?.Status != DeliveryStatus.Committed ||
+                                (command.Acceptance?.ExpectedHash != task.Acceptance.Candidate?.Fingerprint &&
+                                    !(command.Kind == TaskCommandKind.ReviewDelivery && command.Acceptance?.Review?.Accept == true && command.Acceptance.Review.CandidateFingerprint == task.Acceptance.Candidate?.Fingerprint)))
+                                throw new TaskConflictException("Terminal delivery conflict.");
+                        }
+                        else advance = await ExecuteAcceptanceCommandAsync(task, command, lease, CancellationToken.None);
+                        break;
                     case TaskCommandKind.Start:
                         if (task.Receipts.Count > 0) throw new TaskConflictException("Task already exists.");
                         turn = AddTurn(task, command.Request ?? throw new ArgumentException("Request is required.")); advance = true;
@@ -344,6 +372,7 @@ namespace MiniHarness.Harness
                         advance = !terminal;
                         break;
                     case TaskCommandKind.Evidence:
+                        if (task.Acceptance != null) throw new TaskConflictException("V4 evidence requires a registered verification attempt and authorized submission.");
                         if (turn == null || turn.Wait != WaitReason.Evidence || task.Status != AgentTaskStatus.Waiting)
                             throw new TaskConflictException("Task is not awaiting evidence.");
                         foreach (var evidence in command.Evidence)
@@ -409,6 +438,8 @@ namespace MiniHarness.Harness
                         break;
                     default: throw new ArgumentException("Unsupported task command kind.");
                 }
+                if (advance && task.Acceptance != null && turn != null && !terminal)
+                { task.Status = AgentTaskStatus.Ready; task.Wait = WaitReason.None; turn.Status = TurnStatus.Ready; turn.Wait = WaitReason.None; }
                 var receipt = new CommandReceipt
                 {
                     CommandId = command.Id, Fingerprint = fingerprint, AcceptedRevision = task.Revision + 1, TurnId = turn?.Id
@@ -474,6 +505,7 @@ namespace MiniHarness.Harness
                         var uncertain = task.Operations.Where(o => o.TurnId == turn.Id && o.Status == OperationStatus.Started).ToList();
                         foreach (var pending in uncertain) { pending.Status = OperationStatus.Unknown; pending.Effect = EffectState.Unknown; }
                         if (uncertain.Count > 0) Wait(task, turn, WaitReason.Reconciliation, ex.GetType().Name);
+                        else if (task.Acceptance != null && (ex is System.IO.IOException || ex is UnauthorizedAccessException)) Wait(task, turn, WaitReason.Infrastructure, ex.GetType().Name);
                         else { task.Status = AgentTaskStatus.Failed; turn.Status = TurnStatus.Failed; turn.StopReason = ex.GetType().Name; }
                         Emit(task, "Failed", turn, ex.GetType().Name);
                         await CommitAsync(lease, task).ConfigureAwait(false);
@@ -532,6 +564,18 @@ namespace MiniHarness.Harness
             if (UncertainResources(task))
             { Wait(task, turn, WaitReason.Reconciliation, "uncertain_resource_or_input"); await CommitAsync(lease, task); return; }
             if (await YieldForSteeringAsync(task, turn, lease)) return;
+            if (task.Acceptance != null)
+            {
+                await CheckProtectionAsync(task, cancellationToken);
+                if (task.Acceptance.ProtectionViolations.Count > 0)
+                { Wait(task, turn, WaitReason.Evidence, "protected_files_changed"); await CommitAsync(lease, task); return; }
+                if (task.Acceptance.ChangeConflicts.Count > 0 && delivery!.Changes != null)
+                {
+                    task.Acceptance.ChangeConflicts = (await delivery.Changes.FreezeAsync(TaskJson.Clone(task), cancellationToken)).Conflicts;
+                    if (task.Acceptance.ChangeConflicts.Count > 0)
+                    { task.Acceptance.Assessment = Acceptance.AcceptanceEvaluator.Evaluate(task); Wait(task, turn, WaitReason.Reconciliation, "change_set_conflict"); await CommitAsync(lease, task); return; }
+                }
+            }
             if (task.ResourceWaits.Any(w => w.TurnId == turn.Id && w.Status == "active") &&
                 task.Operations.Where(o => o.TurnId == turn.Id).All(o => o.Status == OperationStatus.Finished))
                 if (!await ConsumeWaitAsync(task, turn, lease)) return;
@@ -548,6 +592,12 @@ namespace MiniHarness.Harness
             await RefreshWorkspaceAsync(task, turn, cancellationToken).ConfigureAwait(false);
             if (await YieldForSteeringAsync(task, turn, lease)) return;
             FlushObservations(task, turn);
+            if (task.Acceptance != null)
+            {
+                foreach (var settled in task.Steps.Where(s => s.TurnId == turn.Id)) Acceptance.ProgressPolicy.Sample(task, settled, delivery!.Options);
+                if (task.Acceptance.Progress.Stopped && !Acceptance.AcceptanceEvaluator.Evaluate(task).CanBuildCandidate && !turn.ResumeCompletionCandidate)
+                { Wait(task, turn, WaitReason.NoProgress, "no_progress"); await CommitAsync(lease, task); return; }
+            }
             if (turn.ResumeCompletionCandidate && turn.LastResponse != null && turn.LastResponse.Message.ToolCalls.Count == 0)
             {
                 turn.ResumeCompletionCandidate = false;
@@ -555,6 +605,10 @@ namespace MiniHarness.Harness
             }
             if (turn.Wait == WaitReason.Evidence && turn.LastResponse != null && turn.LastResponse.Message.ToolCalls.Count == 0)
                 if (await FinishCandidateAsync(task, turn, lease, cancellationToken).ConfigureAwait(false)) return;
+            // Local candidate settlement may proceed while stopped; starting new
+            // model work requires an explicit continuation, including after review rejection.
+            if (task.Acceptance?.Progress.Stopped == true)
+            { Wait(task, turn, WaitReason.NoProgress, "no_progress"); await CommitAsync(lease, task); return; }
             if (task.Budget.ModelCalls + task.Budget.ReservedModelCalls >= task.Budget.MaxModelCalls || task.Budget.Usage.TotalTokens + task.Budget.ReservedTokens >= task.Budget.MaxTokens ||
                 (options.StopWhenUsageUnknown && !task.Budget.Usage.Known))
             {
@@ -649,6 +703,8 @@ namespace MiniHarness.Harness
         }
         private static string CommandFingerprint(TaskCommand command)
         {
+            if (command.Acceptance != null || command.Kind >= TaskCommandKind.AmendAcceptanceSpec)
+                return TaskJson.Hash(JsonSerializer.Serialize(new { Version = 4, Command = command }, TaskJson.Options));
             // Preserve fingerprints of pre-extension commands in schema v1.
             var original = new { command.Id, command.TaskId, command.Kind, command.Request, command.ForkedFromResponseId,
                 command.Facts, command.OperationId, command.Approve, command.Results, command.Evidence, command.ReconciledOutcome };

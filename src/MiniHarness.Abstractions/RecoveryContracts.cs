@@ -16,7 +16,7 @@ namespace MiniHarness.Abstractions
         public string Stack { get; set; } = "";
         public DateTimeOffset AtUtc { get; set; }
     }
-    public enum RecoveryClassification { Ready, Terminal, Paused, Input, Approval, ExternalResult, Budget, Reconciliation, Resources, Children, ModelConfiguration, HostAuthorization }
+    public enum RecoveryClassification { Ready, Terminal, Paused, Input, Approval, ExternalResult, Budget, Reconciliation, Resources, Children, ModelConfiguration, HostAuthorization, Review, NoProgress, Infrastructure }
     public sealed class RecoveryOptions
     {
         public RecoveryMode Mode { get; set; } = RecoveryMode.Manual;

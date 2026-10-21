@@ -1,0 +1,21 @@
+{
+  "Delivery": {
+    "Enabled": true,
+    "Directory": "C:/MiniHarnessData/delivery",
+    "AllowReview": true,
+    "AllowContinue": true,
+    "AllowArtifactImport": true,
+    "AllowExternalEvidence": false,
+    "AllowAmendment": false,
+    "Template": {
+      "Criteria": [
+        { "Id": "tests", "Kind": "VerificationProfile", "Profile": "unit_tests", "Required": true },
+        { "Id": "package", "Kind": "ArtifactPresence", "ArtifactName": "package", "Required": true },
+        { "Id": "review", "Kind": "HumanReview", "Required": true }
+      ],
+      "ProtectedPaths": [ "Program.cs", "sample-dotnet-project.csproj", "tests" ],
+      "AllowNewFilesUnder": [ "tests/regressions" ]
+    },
+    "Limits": { "NoProgressLimit": 6, "MaxContinuations": 2, "ExtraAttempts": 2, "MaxArtifactBytes": 8388608, "MaxTaskBytes": 67108864, "MaxArtifacts": 128, "IoTimeoutSeconds": 30 }
+  }
+}
