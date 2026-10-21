@@ -1,8 +1,8 @@
 # V1：受控修改与版本化证据
 
-[架构总览](architecture.md) · [V0 运行内核](v0-runtime.md) · [V2 长任务与进程](v2-processes.md)
+[架构总览](architecture.md) · [V0 运行内核](v0-runtime.md) · [V2 长任务与进程](v2-processes.md) · [V4 可验收交付](v4-delivery.md)
 
-设计范围：V0～V2 体系中的编码能力，基线 `1f363ee`。
+设计范围：V1 建立的编码能力，以及它在 V0～V4 统一执行链中的位置。
 
 ## 设计问题
 
@@ -97,7 +97,7 @@ VerificationTool 在运行前后计算工作区指纹，并生成 EvidenceRecord
 
 ## 完成策略
 
-CodingCompletionPolicy 对照 TaskFacts.RequiredEvidence，寻找当前任务、当前版本的通过记录。缺少证据或只有旧版本证据时，生成具体缺口反馈；预算允许则让模型继续，预算不足则等待。
+没有 V4 AcceptanceSpec 时，CodingCompletionPolicy 对照 TaskFacts.RequiredEvidence，寻找当前任务、当前版本的通过记录。缺少证据或只有旧版本证据时，生成具体缺口反馈；预算允许则让模型继续，预算不足则等待。
 
 ```mermaid
 flowchart TD
@@ -110,9 +110,15 @@ flowchart TD
     STOP -->|否| F
 ```
 
-上图描述配置了必需验证要求的任务。当前实现对没有 RequiredEvidence 的编码任务允许自然结束，因此“启用 Coding”本身不等于“已经配置测试门禁”。需要验证约束时，宿主必须声明 RequiredVerification。
+上图描述旧完成策略下配置了必需验证要求的任务。该策略对没有 RequiredEvidence 的编码任务允许自然结束，因此“启用 Coding”本身不等于“已经配置测试门禁”。沿用该策略时，宿主通过 RequiredVerification 声明约束。
 
 CodingRoutingPolicy 根据任务是否具有验证要求或工作区执行授权选择编码策略，其他任务沿用普通完成策略。V2 进一步在 Runtime 叠加资源收尾检查，业务证据满足也不能使活进程变成无主资源。
+
+## V4 如何强化这条编码闭环
+
+采用 AcceptanceSpec 的任务改由[V4 验收规则](v4-delivery.md)裁决，仍使用同一个验证工具和 Runtime。执行前冻结验证器指纹并登记尝试，结果返回后通过统一证据准入；同一绑定选择最新执行代次，因此新失败不能被旧成功掩盖。RequiredEvidence 在这些任务中只是契约的兼容视图。
+
+V4 同时冻结保护文件基线，并从 ChangeLedger 与实际盘面构建交付变更集。V1 负责执行真实修改和验证，V4 负责证明当前要求、执行结果与冻结产物相互对应。这样增强完成依据，无需新增 Coding Agent 循环，也不改变工具授权和未知副作用的处理入口。
 
 ## 与 V0 的一致性
 

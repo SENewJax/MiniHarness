@@ -1,8 +1,8 @@
 # 架构总览
 
-[项目入口](../../README.md) · [V0 运行内核](v0-runtime.md) · [V1 编码闭环](v1-coding.md) · [V2 长任务与进程](v2-processes.md)
+[项目入口](../../README.md) · [V0 运行内核](v0-runtime.md) · [V1 编码闭环](v1-coding.md) · [V2 长任务与进程](v2-processes.md) · [V3 上下文与恢复](v3-context-recovery.md) · [V4 可验收交付](v4-delivery.md)
 
-核心设计基线：V0～V2，源码提交 `1f363ee`。沿此内核扩展的上下文与恢复见 [V3 专题](v3-context-recovery.md)；本文保留原有职责和执行边界。
+设计范围：V0～V4 的共同架构。版本专题按能力层次展开，本文说明贯穿这些能力的职责、执行流程与演进约束。
 
 ## 设计目标
 
@@ -10,7 +10,7 @@ MiniHarness 将语言模型接入一个持久、可控制的任务执行环境�
 
 这一分工解决的核心问题是：模型输出具有不确定性，文件修改、进程启动和外部调用却会留下真实后果。运行系统必须在模型出错、用户改变要求、调用超时和宿主中断时，仍能解释“发生了什么、还有什么不确定、下一步允许做什么”。
 
-本文及 V0～V2 专题按设计层次描述这一体系。它们说明长期有效的职责和取舍，不逐条回放历史提交，也不代表三个并行运行的 Agent 实现。
+本文及 V0～V4 专题说明长期有效的职责和取舍，不逐条回放历史提交。各版本能力运行在同一个任务内核中。
 
 ## 设计原则
 
@@ -33,8 +33,9 @@ flowchart TB
     NA[原生任务命令] --> APP[TaskApplicationService]
     PA --> APP
     WAKE[资源状态通知与唤醒] -->|提交命令| APP
+    RECOVER[宿主恢复扫描] -->|分类与受控继续| APP
     APP --> RT[TaskRuntime]
-    RT --> CONTEXT[上下文准备与容量控制]
+    RT --> CONTEXT[上下文投影 / 摘要 / 容量控制]
     CONTEXT --> MODEL[IModelProvider]
     MODEL -->|模型响应| RT
     RT --> EXEC[策略 / Operation / ToolExecutor]
@@ -44,6 +45,10 @@ flowchart TB
     RESOURCE --> SESSION[进程会话管理器]
     PROCESS --> SESSION
     RT --> STORE[任务检查点 / 历史 / 证据]
+    RT --> ACCEPT[验收评估 / 进展判定]
+    ACCEPT -->|缺口或候选| RT
+    RT --> SEAL[候选审阅 / 本地封存]
+    SEAL --> BLOBS[不可变产物 / manifest]
     SESSION --> OS[OS 进程树与输入输出]
 ```
 
@@ -53,16 +58,16 @@ flowchart TB
 
 | 程序集 | 责任 | 明确不承担的责任 |
 | --- | --- | --- |
-| `MiniHarness.Abstractions` | 任务、模型、工具、资源等数据与接口契约 | OS 句柄、HTTP 服务和执行策略实现 |
-| `MiniHarness.Harness` | 命令处理、任务推进、预算、操作记录、持久化与完成门禁 | 具体文件编辑算法、供应商 HTTP 格式 |
-| `MiniHarness.Coding` | 工作区工具、变更账本、测试执行与进程会话 | 自己维护另一套 Agent 循环 |
+| `MiniHarness.Abstractions` | 任务、模型、工具、资源、上下文、恢复与验收契约 | OS 句柄、HTTP 服务和执行策略实现 |
+| `MiniHarness.Harness` | 命令与推进、预算、上下文、恢复、验收、封存及持久化 | 具体文件编辑算法、供应商 HTTP 格式 |
+| `MiniHarness.Coding` | 工作区工具、变更账本与冻结变更集、测试执行与进程会话 | 自己维护另一套 Agent 循环 |
 | `MiniHarness.Protocols.OpenAI` | Chat Completions/Responses 的编解码 | 是否继续任务、是否授权工具 |
 | `MiniHarness.Model.OpenAI` | 上游请求、传输错误和有限重试 | 任务状态与用户控制命令 |
 | `MiniHarness.Server` | HTTP、配置、依赖组装、宿主授权与服务生命周期 | 绕过 Runtime 直接推进业务 |
 
 Harness 和 Coding 各自依赖 Abstractions。Model.OpenAI 依赖模型契约及协议编解码。Server 是组合根，将具体实现注入同一个 Runtime。完成策略通过接口传入，Coding 不需要引用 Harness。
 
-## 三种身份与两类事实
+## 执行身份与数据权威
 
 `TaskId` 标识持续目标，`TurnId` 标识一次推进轮次，`StepId` 标识一次模型调用的准备与结果。工具执行再由 `OperationId` 关联具体副作用。HTTP 请求 ID 或供应商响应 ID 不替代这些身份。
 
@@ -71,7 +76,9 @@ Harness 和 Coding 各自依赖 Abstractions。Model.OpenAI 依赖模型契约�
 - **控制事实**：目标、约束、授权范围、预算、未决操作、资源和证据。它们参与执行决策。
 - **观察历史**：用户输入、模型输出、工具结果和外部观察。它们解释发生过什么，并用于构造模型输入。
 
-`PreparedRequest` 是某一步实际发送给模型的有限视图。它可以与完整历史不同，但不能成为权限或证据的唯一来源。当前上下文准备默认透传历史，超容量时受控停止，尚未生成自动摘要。
+`PreparedRequest` 是某一步实际发送给模型的有限视图。V3 将有效摘要、保留原文和当前事实组合为模型输入；自动摘要默认关闭，开启后仍保留完整历史。投影和摘要都不能成为权限或证据的唯一来源，固定内容超容量时仍受控停止。
+
+V4 增加验收契约、验证尝试、候选和交付记录，但不把它们交给摘要维护。验证结果必须绑定执行代次与对象；交付清单引用冻结字节。当前状态用于控制下一步，封存记录用于解释完成时的依据，两者都有明确归属。
 
 ## 执行路由的一致性
 
@@ -83,15 +90,31 @@ Harness 和 Coding 各自依赖 Abstractions。Model.OpenAI 依赖模型契约�
 
 Responses 的 `previous_response_id` 创建历史分支任务；原生 `Input`、`Resume`、`Steer` 针对既有 TaskId。分支和继续是不同操作，不能因为它们都带“历史”就共享预算或活资源。
 
-## V0 → V1 → V2 的演进关系
+## V0 → V4 的演进关系
 
 | 设计层次 | 核心问题 | 引入的能力 | 延续的基础 |
 | --- | --- | --- | --- |
 | V0 | 如何可靠地推进一个目标？ | 状态机、工具协议、预算、检查点、审批与核实 | 任务身份、固定执行链、可替换契约 |
 | V1 | 如何把模型建议变成有证据的代码修改？ | 工作区边界、带前置条件的编辑、变更账本、版本化验证证据 | 同一工具执行器和完成策略接口 |
 | V2 | 外部工作未结束时，如何继续观察与控制？ | 真实进程、增量输出、stdin、持久等待、唤醒和纠正 | 同一资源契约、命令通道、任务预算和持久状态 |
+| V3 | 历史变长或宿主重启后，如何保持连续性？ | 上下文投影、受校验摘要、统一调用账本与恢复分类 | 同一步骤准备、预算、操作核实和命令调度 |
+| V4 | 如何证明交付、准确等待并停止无效修复？ | 版本化契约、可信证据、无进展控制、候选审阅与封存 | 同一工具与完成链、控制准入、恢复和任务存储 |
 
 演进允许修改 Runtime。判断架构是否保持稳定，应看状态所有权、依赖方向和控制链是否延续，而不是核心文件的改动行数。V2 增加资源收尾要求是完成规则的强化；没有资源的普通任务不因此承担另一套生命周期。
+
+V3 在冻结业务请求之前整理上下文，在重新推进之前分类恢复状态。V4 在验证执行之前登记尝试，在结果返回后统一准入，在自然完成时调用确定性评估和封存。它们嵌入既有安全点；审阅、恢复与模型自然结束最终接回同一完成方法。没有 AcceptanceSpec 的旧任务保留原完成策略，新契约任务使用 V4 裁决。
+
+## 模型决策怎样接入固定流程
+
+| 环节 | 模型动态决定 | 程序固定执行 |
+| --- | --- | --- |
+| 规划与修改 | 搜索范围、修复思路、工具及参数 | 能力快照、授权、操作意图、文件版本检查与结果归档 |
+| 长工作 | 启动、读取、交互、等待的业务选择 | 资源所有权、等待持久化、取消与唤醒去重 |
+| 上下文 | 提出描述性摘要 | 选择完整历史组、校验摘要来源与收益、计费和提交 |
+| 验证 | 选择已授权 profile、依据失败修复 | 持久尝试、结果绑定、最新代次选择、保护文件复核 |
+| 完成 | 提出完成说明 | 统一判定缺口、进展额度、审阅绑定、封存与原子完成 |
+
+连接方式是结构化请求和结果：模型提出行动，Runtime 验证并执行，真实观察再进入模型上下文。缺口需要推理时才继续模型；等待外部事实、核实未知效果或本地封存时，由程序执行对应状态转换。业务路线可变，控制顺序保持一致。
 
 ## 关键取舍
 
@@ -102,6 +125,8 @@ Responses 的 `previous_response_id` 创建历史分支任务；原生 `Input`�
 | Unknown 状态与显式核实 | 避免重复修改和错误完成 | 某些中断需要宿主或用户介入，不能总是自动继续 |
 | 宿主声明可执行能力 | 模型可以选择行动，授权范围保持可控 | 宿主需要配置工具、工作区和 profile |
 | 原生任务 API + 协议适配 | 保留兼容接口，同时表达完整任务控制 | OpenAI 风格接口只支持一个明确子集 |
+| 保留原历史，只压缩模型视图 | 模型输入有界且原文可追溯 | 摘要增加调用成本，检查点仍会增长 |
+| 确定性验收与不可变交付包 | 完成依据可以脱离工作区复验 | 增加存储和本地提交阶段；哈希不能证明验收设计充分 |
 
 持久化意图和幂等收据能减少重复执行，不能提供任意外部系统上的 exactly-once 保证。文件系统、OS 进程和任务检查点之间没有统一事务；设计用可核实记录暴露这些间隙。
 
@@ -118,5 +143,7 @@ Responses 的 `previous_response_id` 创建历史分支任务；原生 `Input`�
 - [统一组装](../../src/MiniHarness.Server/Program.cs)、[应用服务](../../src/MiniHarness.Harness/TaskApplicationService.cs)
 - [核心契约](../../src/MiniHarness.Abstractions/TaskContracts.cs)、[任务模型](../../src/MiniHarness.Abstractions/TaskModel.cs)
 - [任务内核](../../src/MiniHarness.Harness/TaskRuntime.cs)、[模型适配器](../../src/MiniHarness.Model.OpenAI/OpenAiModelProvider.cs)
+- [上下文准备](../../src/MiniHarness.Harness/TaskRuntime.Context.cs)、[恢复分类](../../src/MiniHarness.Harness/TaskRuntime.Recovery.cs)
+- [验收规则](../../src/MiniHarness.Harness/Acceptance/AcceptanceRules.cs)、[交付编排](../../src/MiniHarness.Harness/TaskRuntime.Delivery.cs)
 
-继续阅读：[V0 运行内核](v0-runtime.md) → [V1 编码闭环](v1-coding.md) → [V2 长任务与进程](v2-processes.md)。
+继续阅读：[V0 运行内核](v0-runtime.md) → [V1 编码闭环](v1-coding.md) → [V2 长任务与进程](v2-processes.md) → [V3 上下文与恢复](v3-context-recovery.md) → [V4 可验收交付](v4-delivery.md)。

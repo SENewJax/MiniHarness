@@ -1,6 +1,42 @@
 # V4：可验收的本地交付
 
+[项目入口](../../README.md) · [架构总览](architecture.md) · [V1 编码闭环](v1-coding.md) · [V2 长任务与进程](v2-processes.md) · [V3 上下文与恢复](v3-context-recovery.md)
+
 每个采用 AcceptanceSpec 的任务，进入 TaskCompleted 时必须原子关联一份已封存、可独立核查的交付记录。没有契约的旧任务保留原完成语义，不补造记录。普通轮次完成不等于交付完成。
+
+## 设计问题
+
+V1 已能把代码修改和验证结果关联起来，V2 管理仍在运行的资源，V3 保留长任务的上下文与恢复事实。但“曾经测试通过”仍不足以解释最终交付：要求可能变化，后续验证可能失败，产物可能被替换，人工批准也可能针对旧版本。
+
+V4 将完成定义为一个可复核的事实组合：当前要求、当前验证对象、可信执行结果、冻结产物以及必要的审阅必须一致。缺口能由模型修复时反馈给模型；需要外部证据时等待；重复无效修复时停止。存储失败则进入本地处理，不能让模型为磁盘故障反复改代码。
+
+## 在既有执行链中的位置
+
+```mermaid
+flowchart TD
+    ENTRY[协议入口 / 原生命令 / 恢复] --> RT[同一 TaskRuntime]
+    RT --> MODEL[上下文准备与模型推理]
+    MODEL -->|工具建议| OP[策略 / Operation / 工具执行]
+    OP -->|验证工具| ATTEMPT[验证前保存尝试与绑定]
+    OP -->|其他工具结果| RT
+    ATTEMPT --> RUN[真实验证与日志]
+    RUN --> ADMIT[统一证据准入]
+    HOST[获授权的宿主结果] --> ADMIT
+    ADMIT --> FACTS[任务事实与不可变证据]
+    MODEL -->|自然完成说明| EVAL[确定性验收评估]
+    FACTS --> EVAL
+    EVAL -->|可修复缺口且额度允许| MODEL
+    EVAL -->|外部缺口或无进展| WAIT[持久等待 / 停止]
+    EVAL -->|自动条件满足| CANDIDATE[冻结候选指纹]
+    CANDIDATE --> REVIEW{需要人工审阅?}
+    REVIEW -->|是| APPROVAL[等待绑定当前候选的批准]
+    REVIEW -->|否| SEAL[Preparing / 导入与生成 / Sealed]
+    APPROVAL -->|有效批准| SEAL
+    SEAL --> CHECK[控制准入下重核依赖与全部字节]
+    CHECK --> COMMIT[同次提交交付引用与 TaskCompleted]
+```
+
+图中的验收与封存都是 Runtime 的固定阶段。模型与宿主可以提出动作，但不能自行修改阶段结果。恢复、自动完成和审阅后的本地结算共享同一条封存路径。
 
 ## 职责与信任范围
 
@@ -8,13 +44,38 @@
 
 固定支持 VerificationProfile、ArtifactPresence、HumanReview。模型能选择工具和提出完成说明，不能修改契约、批准自己、指定可信来源或绕过停止条件。
 
+| 组件 | 设计责任 |
+| --- | --- |
+| AcceptanceSpec 与宿主授权 | 定义要求、保护范围、版本与不可降低的宿主下限 |
+| TaskRuntime | 持有任务状态，编排尝试、证据、候选、审阅与最终提交 |
+| EvidenceAdmission | 校验执行绑定、来源和唯一结算，统一工具与宿主结果准入 |
+| AcceptanceEvaluator / ProgressPolicy | 从持久事实确定缺口、候选资格与无进展状态 |
+| IChangeSetProvider | 采集工作区基线、冻结变更集，核对账本与盘面，区分 Agent 修改和外部变化 |
+| IArtifactStore / DeliveryManifestBuilder | 保存及读取冻结内容，构建清单并支持独立复验 |
+
+硬编码的是准入顺序与不变量：先记录尝试再执行、按代次选证据、先满足自动检查再审阅、最终核验后原子提交。模型动态决定的是修复方案、工具选择和完成说明。二者通过结构化工具结果、验收缺口和任务命令串联，程序不预先写死每项业务的读改测步骤。
+
 部署面向单宿主共享信任域。宿主显式开启外部证据、审阅、修订、产物导入或人工继续，代表信任能访问这些管理命令的调用方；Actor 由宿主配置，客户端字符串不构成身份认证。首版无远程签名、多租户身份、任意规则 DSL、自动发布或 OS 文件隔离。
+
+## 契约、绑定与内容身份
+
+| 标识 | 解决的问题 |
+| --- | --- |
+| SpecHash / CriterionId | 当前按哪一版要求、哪一条标准判定 |
+| AttemptId / Generation | 哪一次验证执行，以及执行顺序 |
+| WorkspaceRevision / SubjectHash | 验证面对的是哪份工作区或逻辑产物 |
+| VerifierFingerprint | 执行器是否仍是被冻结的 profile 配置 |
+| CandidateFingerprint | 审阅和封存是否针对同一组事实与说明 |
+| ArtifactId + TaskId | 谁拥有这份产物引用 |
+| BlobHash / manifest 哈希 | 实际内容是否与冻结记录一致 |
+
+这些标识不能相互替代。两个任务可以拥有相同内容哈希，却没有彼此的访问权；同一工作区可重复验证，却必须区分新失败与旧成功；任务修订号可因记账变化，而无需让同一候选的批准失效。
 
 ## 状态与命令契约
 
 所有命令先去重。同 ID 同载荷返回原收据；同 ID 不同载荷冲突。新的命令 ID 不代表新的验证尝试、批准或人工继续额度。旧命令的指纹分支保持；V4 命令使用独立版本分支。
 
-下表中的允许均还要满足宿主权限、模型绑定、任务归属和其他阻塞。运行中的命令在同一 Gate/lease 中执行；Pause/Cancel/Steer 的准入独立于长执行锁。
+下表合并展示任务状态与等待原因，并非新增一套状态枚举。允许的动作仍须满足宿主权限、模型绑定、任务归属和其他阻塞。运行中的命令在同一 Gate/lease 中执行；Pause/Cancel/Steer 的准入独立于长执行锁。
 
 | 状态 | AmendAcceptanceSpec | ReviewDelivery | ContinueAfterNoProgress | FinalizeDelivery |
 | --- | --- | --- | --- | --- |
@@ -116,9 +177,11 @@ V4 也允许在已结算的 Evidence 等待点预留并创建子任务；Review�
 
 ## 使用与独立复验
 
-Delivery 默认关闭，配置示例见 ../../examples/delivery.json。启用时须有有效宿主模板，实际验证 profile 来自 Coding 配置；模板为空不降级完成。变更产物根必须在工作区外。来源、审阅、修订等管理权限独立开启。
+Delivery 默认关闭，[配置示例](../../examples/delivery.json)只包含 Delivery 节，需要合并到服务配置中，并同时设置工作区、启用 Coding 和定义引用的验证 profile。示例使用 unit_tests、逻辑产物 package 与人工审阅要求；文件保护路径也须按实际工程调整。它不是可独立启动的完整配置文件。
 
-命令示例见 ../../examples/delivery.http。自动检查已通过而仅缺宿主产物导入时，进入 Evidence 等待，不让模型反复声明完成。最终生成结果附带同一个 manifest 的 URL 和 SHA-256；原始模型历史与候选说明保持原样。
+启用时须有有效宿主模板，实际验证 profile 来自 Coding 配置，宿主按结构化配置生成验证器指纹；模板为空不降级完成。交付存储根必须在工作区外。来源、审阅、修订等管理权限独立开启，启用 Delivery 不等于开放所有管理命令。
+
+命令示例见[交付请求](../../examples/delivery.http)。自动检查已通过而仅缺宿主产物导入时，进入 Evidence 等待，不让模型反复声明完成。最终生成结果附带同一个 manifest 的 URL 和 SHA-256；原始模型历史与候选说明保持原样。
 
 - GET /agent/tasks/{id}/acceptance：当前只读评估。
 - GET /agent/tasks/{id}/progress：计数与停止指纹。
@@ -131,13 +194,37 @@ Delivery 默认关闭，配置示例见 ../../examples/delivery.json。启用时
 解压交付包后，可在服务停止、工作区不存在的情况下运行：
 
 ```powershell
-dotnet run --project src/MiniHarness.Server -c Release --no-build -- --verify-delivery C:/delivery/package --expected-manifest-hash <从可信任务记录取得的哈希>
+$manifestHash = "<从可信任务记录取得的 SHA-256>"
+dotnet run --project src/MiniHarness.Server --no-launch-profile -- --verify-delivery C:/delivery/package --expected-manifest-hash $manifestHash
 ```
 
-独立检查不调用模型、不修改任务，核对实际字节、候选及记录一致性。它不自动证明测试覆盖充分，也不能在任务存储和全部哈希锚点都被恶意替换时充当第三方公证。
+以上命令在本仓库根目录执行，package 指向解压后的交付目录；也可以使用已构建的 Server 程序执行相同参数。该入口在构建 Web 宿主之前运行，不需要启动服务或配置模型。
+
+独立检查不调用模型、不修改任务，核对实际字节、候选及记录一致性。期望哈希应从可信任务记录或外部保留值取得，不能仅相信待核查包内自报的哈希。它不自动证明测试覆盖充分，也不能在任务存储和全部哈希锚点都被恶意替换时充当第三方公证。
 
 BlobHash 是内容身份；ArtifactId+TaskId 是访问归属。LogicalName 表示验收中的逻辑产物名，新版本使用新 ArtifactId，不能覆盖旧冻结对象。首版任务隔离、限制单文件/总量/数量，暂不自动垃圾回收。
 
 逻辑产物的 Generation 由 Runtime 分配；相同 ID 同内容重交保留原代次，当前验证对象按代次选择，不依赖数组或文件名字典序。数量限制同时约束内容存储和任务内引用，不能靠同内容换 ID 绕过。
 
-schema 1/2 的旧任务保持兼容。V3 的 18 参数构造入口、旧 14 参数入口及宿主初始化入口保留；扩展服务通过新的可选参数接入。V4 的 RequiredEvidence 字符串列表仅为生效 Spec 的兼容视图，初始化、修订和恢复均重新投影，不形成第二套裁决。
+## 兼容与设计取舍
+
+schema 1/2 的旧任务通过显式迁移继续读取，旧 Runtime 构造与宿主初始化入口保留，交付依赖通过可选扩展服务接入。V4 的 RequiredEvidence 字符串列表仅为生效 Spec 的兼容视图，初始化、修订和恢复均重新投影，不形成第二套裁决。
+
+| 选择 | 收益 | 代价与边界 |
+| --- | --- | --- |
+| 固定类型的验收契约 | 判定可解释，模型不能修改裁判规则 | 新标准类型需要程序扩展，不能任意执行规则脚本 |
+| 验证前登记执行代次 | 乱序返回不会倒退当前结论 | 未知尝试必须核实，不能无条件重试 |
+| 候选与批准分别绑定 | 防止批准被转移到变化后的交付 | 依赖变化需重新形成候选与审阅 |
+| 多阶段封存、一次提交完成 | 崩溃后可重建本地内容，不重跑业务 | 文件与检查点没有跨系统事务，可能留下未提交内容 |
+| 无进展停止与有限继续 | 避免重复失败无限消耗 | 启发式只衡量契约结果，不能证明所有探索都没有价值 |
+| 内容寻址与外部可信哈希 | 交付包可离线核对 | 不提供第三方签名，也不替代业务测试质量 |
+
+V4 的架构约束是延续 V0 的状态和操作所有权、V1 的真实工具与账本、V2 的资源门禁、V3 的费用和恢复边界。后续增强验收类型或存储实现，应扩展这些契约并处理格式迁移，不另建按协议区分的完成循环。
+
+## 源码导航
+
+- [验收与交付契约](../../src/MiniHarness.Abstractions/AcceptanceContracts.cs)、[宿主配置与授权](../../src/MiniHarness.Server/DeliveryServerOptions.cs)
+- [证据准入、确定性评估与进展规则](../../src/MiniHarness.Harness/Acceptance/AcceptanceRules.cs)、[管理命令](../../src/MiniHarness.Harness/TaskRuntime.Acceptance.cs)
+- [候选与封存编排](../../src/MiniHarness.Harness/TaskRuntime.Delivery.cs)、[交付查询](../../src/MiniHarness.Harness/TaskRuntime.DeliveryQueries.cs)
+- [内容存储](../../src/MiniHarness.Harness/Delivery/FileArtifactStore.cs)、[清单构建与独立复验](../../src/MiniHarness.Harness/Delivery/DeliveryManifest.cs)
+- [工作区基线与变更集](../../src/MiniHarness.Coding/DeliveryChangeSetProvider.cs)、[恢复](../../src/MiniHarness.Harness/TaskRuntime.Recovery.cs)、[格式迁移](../../src/MiniHarness.Harness/TaskStateMigration.cs)

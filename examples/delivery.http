@@ -1,5 +1,5 @@
 ### Task commands use the same endpoint as V0-V3. Host capabilities default to denied.
-@base = http://localhost:5000
+@base = http://127.0.0.1:5080
 @task = task_REPLACE_WITH_TASK_ID
 
 ### Read current assessment (no model calls)

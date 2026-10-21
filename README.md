@@ -8,7 +8,7 @@ MiniHarness 将模型、工具和外部进程接入同一个任务运行内核�
 
 > Agent = Model + Harness。模型选择行动，Harness 约束执行并记录真实结果。
 
-[架构总览](docs/design/architecture.md) · [运行内核](docs/design/v0-runtime.md) · [编码闭环](docs/design/v1-coding.md) · [长任务与进程](docs/design/v2-processes.md) · [可验收交付](docs/design/v4-delivery.md)
+[架构总览](docs/design/architecture.md) · [运行内核](docs/design/v0-runtime.md) · [编码闭环](docs/design/v1-coding.md) · [长任务与进程](docs/design/v2-processes.md) · [上下文与恢复](docs/design/v3-context-recovery.md) · [可验收交付](docs/design/v4-delivery.md)
 
 ## 核心能力
 
@@ -33,19 +33,24 @@ Delivery 默认关闭。启用验收契约的任务，只有要求、当前证�
 flowchart LR
     API[协议接口 / 原生任务 API] --> APP[统一应用服务]
     APP --> CORE[TaskRuntime]
-    CORE <--> MODEL[模型适配器]
+    RECOVERY[恢复扫描 / 资源唤醒] --> APP
+    CORE --> CONTEXT[上下文投影 / 摘要]
+    CONTEXT --> MODEL[模型适配器]
+    MODEL --> CORE
     CORE --> TOOLS[策略与工具执行]
     TOOLS --> CODING[文件编辑 / 验证]
     TOOLS --> PROCESS[进程会话]
     CORE --> RESOURCE[资源管理]
     RESOURCE --> PROCESS
+    CORE --> DELIVERY[确定性验收 / 审阅 / 封存]
+    DELIVERY --> ARTIFACTS[不可变产物 / 交付清单]
     CORE --> STORE[状态 / 历史 / 证据]
 ```
 
 - **一个执行内核**：所有任务入口共享初始化、预算、状态转换和完成规则。
 - **先记录，再行动**：副作用开始前保存意图；结果未知时进入核实，避免盲目重放。
 - **寿命与连接分离**：任务和进程不依赖某一次 HTTP 连接存活。
-- **完成需要依据**：配置了验证要求的任务，必须具有当前工作区版本的通过证据；活资源也需要确认收尾。
+- **完成需要依据**：验证证据必须匹配当前要求与工作区；活资源需要确认收尾。采用 V4 契约的任务，还需通过统一验收并原子提交交付记录。
 
 详细职责、状态模型和设计取舍见[架构总览](docs/design/architecture.md)。
 
@@ -94,10 +99,13 @@ Invoke-RestMethod -Uri "http://127.0.0.1:5080/v1/chat/completions" `
 | `Processes` | 后台进程开关、宿主 profile、输入输出及生命周期限制 |
 | `Context` | 自动摘要、近期原文、尺寸与调用上限、检查点和历史查询限制 |
 | `Recovery` | Manual/Safe 恢复、并发与重试限制、可信核对授权 |
+| `Delivery` | 验收模板、保护范围、审阅与证据授权、无进展限制和产物存储 |
 
 模型配置未显式设置时，也可整组提供 `CODING_PLAN_URL`、`CODING_PLAN_APIKEY`、`CODING_PLAN_MODEL`；上游协议仍由 `Model:Protocol` 选择。相对存储路径按服务内容根目录解析，需要固定位置时使用绝对路径。
 
 编码任务需设置 `Server:WorkspaceRoot` 并开启 `Coding:Enabled`。需要测试门禁时，同时声明验证 profile 和 `Coding:RequiredVerification`。后台进程另行开启 `Processes:Enabled` 并声明 profile，其状态目录需位于源码工作区外。
+
+启用 V4 时还需配置非空 `Delivery:Template`，其中验证项引用已配置的 Coding profile；产物存储目录须位于工作区外。[Delivery 配置片段](examples/delivery.json)需要与工作区和 Coding 配置合并使用，详细规则见[交付设计](docs/design/v4-delivery.md)。
 
 | API | 用途 | 示例 |
 | --- | --- | --- |
@@ -106,6 +114,8 @@ Invoke-RestMethod -Uri "http://127.0.0.1:5080/v1/chat/completions" `
 | `/agent/tasks/{id}`、`/agent/tasks/{id}/events` | 查询任务与观察进度 | [任务命令](examples/task-commands.http) |
 | `/agent/tasks/{id}/resources/{resourceId}/output` | 按游标读取进程输出 | [进程交互](examples/process-tasks.http) |
 | `/agent/tasks/{id}/recovery`、`context`、`history`、`failure` | 只读恢复、上下文、原历史和后台停止诊断 | [V3 请求](examples/context-recovery.http) |
+| `/agent/tasks/{id}/acceptance`、`progress`、`delivery` | 只读验收判定、无进展状态与交付记录 | [交付请求](examples/delivery.http) |
+| `/agent/tasks/{id}/artifacts/{artifactId}`、`/agent/tasks/{id}/delivery/bundle` | 校验后读取产物、导出可独立复验的交付包 | [交付请求](examples/delivery.http) |
 
 需要保持同一任务和累计预算时使用原生任务 API。Responses 的 `previous_response_id` 表示历史分支，不等同于继续原任务。
 
@@ -118,10 +128,9 @@ Invoke-RestMethod -Uri "http://127.0.0.1:5080/v1/chat/completions" `
 | [V1：受控修改与版本化证据](docs/design/v1-coding.md) | 工作区边界、编辑前置条件、变更归属和证据完成策略 |
 | [V2：长任务与进程生命周期](docs/design/v2-processes.md) | 资源所有权、持久等待、输入输出、纠正与取消 |
 | [V3：上下文与恢复](docs/design/v3-context-recovery.md) | 模型投影、摘要权威边界、统一成本和安全恢复 |
+| [V4：可验收的本地交付](docs/design/v4-delivery.md) | 验收契约、证据代次、候选审阅、无进展与原子封存 |
 
 ## 开发与测试
-
-上下文投影、摘要成本与恢复边界见 [V3 设计](docs/design/v3-context-recovery.md)。
 
 源码位于 [src](src)，场景测试位于 [tests](tests)，请求及样例工程位于 [examples](examples)。
 
@@ -130,7 +139,7 @@ Invoke-RestMethod -Uri "http://127.0.0.1:5080/v1/chat/completions" `
 .\scripts\verify.ps1
 ```
 
-测试覆盖模型与协议、命令控制、文件操作、真实进程和持久化故障。外部模型测试位于 [MiniHarness.LiveTests](tests/MiniHarness.LiveTests)，需真实服务配置并会消耗模型额度，不由默认离线命令触发。
+测试覆盖模型与协议、命令控制、文件操作、真实进程、上下文恢复和交付事务中的持久化故障。外部模型测试位于 [MiniHarness.LiveTests](tests/MiniHarness.LiveTests)，需真实服务配置并会消耗模型额度，不由默认离线命令触发。
 
 ## 适用范围
 
@@ -139,3 +148,4 @@ Invoke-RestMethod -Uri "http://127.0.0.1:5080/v1/chat/completions" `
 - 文件修改采用创建和唯一文本替换，不提供语义重构、多文件事务或自动 Git 提交。
 - 后台进程采用 Windows Job 管理；不提供 PTY、任意 shell 或跨宿主重启无缝接管。
 - 上下文压缩保留原历史，不缩小整个检查点；固定部分超限、摘要无收益或预算不足时仍会受控停止。尚无向量检索、跨供应商原生项迁移或任意状态自动恢复。
+- 交付复验依赖外部可信的 manifest 哈希，只验证包内字节、绑定和记录一致性；业务正确性仍取决于验收要求与验证器。当前不提供远程签名、自动发布或产物自动清理。
